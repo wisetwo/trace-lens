@@ -1,0 +1,45 @@
+{
+  "name": "trace-lens",
+  "version": "0.1.0",
+  "description": "Interactive graph viewer for multi-agent LLM trace logs",
+  "type": "module",
+  "bin": {
+    "trace-lens": "bin/trace-lens.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:ui && npm run build:server",
+    "build:ui": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "prepack": "npm run build",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.10.0",
+    "commander": "^12.1.0",
+    "elkjs": "^0.10.0",
+    "express": "^4.21.2",
+    "open": "^10.2.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-syntax-highlighter": "^16.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.23",
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.6",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@vitejs/plugin-react": "^4.5.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
