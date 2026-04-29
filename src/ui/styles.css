@@ -74,10 +74,9 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .content-block pre, .tool-call-block pre, .tool-def pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: 12px; line-height: 1.55; }
 .collapsible-wrap { position: relative; margin: 8px 0 0; }
 .collapsible-content { position: relative; transition: max-height .18s ease; max-width: 100%; }
-.collapsible-content.can-expand { cursor: zoom-in; }
+.collapsible-content.can-expand { cursor: pointer; }
 .collapsible-content.collapsed { overflow: hidden; }
 .collapsible-content.expanded { overflow: hidden; }
-.collapsible-content.expanded.can-expand { cursor: zoom-out; }
 .collapsible-inner { min-height: 0; max-width: 100%; overflow: hidden; }
 .expand-hint { margin-top: 7px; color: #64748b; font-size: 12px; user-select: none; }
 .text-block { padding: 10px 12px; }
