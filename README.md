@@ -16,10 +16,10 @@ Trace Lens turns structured trace events into a graph that helps you inspect mul
 
 ```bash
 # Install globally
-npm install -g trace-lens
+npm install -g @wisetwo/trace-lens
 
 # Or run without installing
-npx trace-lens ./logs/trace.jsonl
+npx @wisetwo/trace-lens ./logs/trace.jsonl
 ```
 
 ## Quick Start

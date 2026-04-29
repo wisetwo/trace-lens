@@ -1,5 +1,5 @@
 {
-  "name": "trace-lens",
+  "name": "@wisetwo/trace-lens",
   "version": "0.1.0",
   "description": "Interactive graph viewer for multi-agent LLM trace logs",
   "type": "module",
