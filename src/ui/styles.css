@@ -106,6 +106,11 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .tool-call-block { border: 1px solid #bfdbfe; border-radius: 12px; background: #eff6ff; padding: 12px; }
 .content-image { max-width: 100%; border-radius: 12px; border: 1px solid #e2e8f0; }
 
+.tools-section { display: flex; flex-direction: column; gap: 14px; }
+.tools-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #e9d5ff; border-radius: 12px; background: #faf5ff; }
+.tool-name-list { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.tool-name-chip { display: inline-flex; align-items: center; max-width: 260px; padding: 5px 8px; border-radius: 999px; background: #fff; color: #6d28d9; border: 1px solid #ddd6fe; font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-details-toggle { flex: 0 0 auto; }
 .tools-list { display: flex; flex-direction: column; gap: 14px; }
 .tool-def { border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; background: #f8fafc; }
 .tool-def-header { display: flex; gap: 8px; align-items: center; font-weight: 800; margin-bottom: 10px; }

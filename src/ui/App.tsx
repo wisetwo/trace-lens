@@ -472,7 +472,21 @@ function TextBlock({ text, label, variant }: { text: string; label?: string; var
 }
 
 function ToolList({ tools }: { tools: TraceToolDef[] }) {
-  return <div className="tools-list">{tools.map((tool, index) => <ToolItem key={`${tool.name}-${index}`} tool={tool} index={index} />)}</div>;
+  const [showDetails, setShowDetails] = useState(false);
+
+  return (
+    <div className="tools-section">
+      <div className="tools-summary">
+        <div className="tool-name-list" aria-label="Tool names">
+          {tools.map((tool, index) => <code key={`${tool.name}-${index}`} className="tool-name-chip">{tool.name}</code>)}
+        </div>
+        <button className="button small tool-details-toggle" onClick={() => setShowDetails((value) => !value)}>
+          {showDetails ? "Hide details" : "Show details"}
+        </button>
+      </div>
+      {showDetails ? <div className="tools-list">{tools.map((tool, index) => <ToolItem key={`${tool.name}-${index}`} tool={tool} index={index} />)}</div> : null}
+    </div>
+  );
 }
 
 function ToolItem({ tool, index }: { tool: TraceToolDef; index: number }) {
