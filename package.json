@@ -2,6 +2,7 @@
   "name": "@wisetwo/trace-lens",
   "version": "0.1.0",
   "description": "Interactive graph viewer for multi-agent LLM trace logs",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "trace-lens": "bin/trace-lens.js"
@@ -9,7 +10,8 @@
   "files": [
     "bin/",
     "dist/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "npm run build:ui && npm run build:server",

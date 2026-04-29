@@ -120,3 +120,7 @@ npm run typecheck
 ```
 
 The Vite dev server runs at `http://localhost:5173` and proxies API requests to `http://localhost:3117`.
+
+## License
+
+MIT
