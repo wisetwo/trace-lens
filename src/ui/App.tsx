@@ -366,8 +366,8 @@ function CollapsibleBlock({ children, className = "", defaultExpanded = false }:
         style={{ maxHeight: expanded ? measuredHeight : COLLAPSED_BLOCK_HEIGHT }}
         role={canExpand ? "button" : undefined}
         tabIndex={canExpand ? 0 : undefined}
-        title={canExpand ? (expanded ? "点击收起" : "点击展开") : undefined}
-        onClick={toggle}
+        title={canExpand ? (expanded ? "Double-click to collapse" : "Double-click to expand") : undefined}
+        onDoubleClick={toggle}
         onKeyDown={(event) => {
           if (canExpand && (event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
@@ -379,7 +379,7 @@ function CollapsibleBlock({ children, className = "", defaultExpanded = false }:
           {children}
         </div>
       </div>
-      {canExpand ? <div className="expand-hint">{expanded ? "点击内容收起 ↑" : "点击内容展开 ↓"}</div> : null}
+      {canExpand ? <div className="expand-hint">{expanded ? "Double-click content to collapse ↑" : "Double-click content to expand ↓"}</div> : null}
     </div>
   );
 }
