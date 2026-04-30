@@ -117,6 +117,9 @@ npm run build
 
 # Type check
 npm run typecheck
+
+# Publish a patch release (also supports minor, major, or an explicit version)
+npm run release -- patch
 ```
 
 The Vite dev server runs at `http://localhost:5173` and proxies API requests to `http://localhost:3117`.

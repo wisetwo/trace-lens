@@ -19,6 +19,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "prepack": "npm run build",
     "dev": "vite",
+    "release": "node scripts/release.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {

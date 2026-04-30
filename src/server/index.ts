@@ -1,4 +1,5 @@
 import express from "express";
+import type { Server } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TraceStore, resolveTraceFile } from "./trace-reader.js";
@@ -62,9 +63,7 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     });
   });
 
-  const listener = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
-    const server = app.listen(options.port, () => resolve(server));
-  });
+  const listener = await listenOnAvailablePort(app, options.port);
 
   const address = listener.address();
   const actualPort = typeof address === "object" && address ? address.port : options.port;
@@ -72,4 +71,40 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     url: `http://localhost:${actualPort}`,
     stop: () => new Promise((resolve, reject) => listener.close((error) => (error ? reject(error) : resolve()))),
   };
+}
+
+async function listenOnAvailablePort(app: express.Express, preferredPort: number): Promise<Server> {
+  const maxAttempts = 100;
+  for (let offset = 0; offset < maxAttempts; offset += 1) {
+    const port = preferredPort + offset;
+    try {
+      return await listen(app, port);
+    } catch (error) {
+      if (!isAddressInUse(error)) throw error;
+    }
+  }
+
+  throw new Error(`No available port found from ${preferredPort} to ${preferredPort + maxAttempts - 1}`);
+}
+
+function listen(app: express.Express, port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port);
+
+    const handleError = (error: Error) => {
+      server.off("listening", handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      server.off("error", handleError);
+      resolve(server);
+    };
+
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+  });
+}
+
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
 }
