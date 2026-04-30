@@ -1,6 +1,6 @@
 {
   "name": "@wisetwo/trace-lens",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Interactive graph viewer for multi-agent LLM trace logs",
   "license": "MIT",
   "type": "module",

@@ -13,14 +13,10 @@ const lockPath = path.join(rootDir, "package-lock.json");
 
 const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
 const lockJson = JSON.parse(await readFile(lockPath, "utf8"));
-const next = nextVersion(packageJson.version, bump);
+const current = packageJson.version;
+const next = nextVersion(current, bump);
 
-packageJson.version = next;
-if (lockJson.version !== undefined) lockJson.version = next;
-if (lockJson.packages?.[""]?.version !== undefined) lockJson.packages[""].version = next;
-
-await writeJson(packagePath, packageJson);
-await writeJson(lockPath, lockJson);
+await updateVersion(next);
 
 const npmPublishArgs = ["publish", ...publishArgs];
 if (!publishArgs.includes("--access") && !publishArgs.some((arg) => arg.startsWith("--access="))) {
@@ -28,7 +24,13 @@ if (!publishArgs.includes("--access") && !publishArgs.some((arg) => arg.startsWi
 }
 
 console.log(`Version updated to ${next}`);
-await run("npm", npmPublishArgs);
+try {
+  await run("npm", npmPublishArgs);
+} catch (error) {
+  await updateVersion(current);
+  console.error(`Publish failed. Version rolled back to ${current}.`);
+  throw error;
+}
 
 function nextVersion(current, bumpType) {
   if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bumpType)) {
@@ -59,6 +61,15 @@ function nextVersion(current, bumpType) {
   }
 
   return version.join(".");
+}
+
+async function updateVersion(version) {
+  packageJson.version = version;
+  if (lockJson.version !== undefined) lockJson.version = version;
+  if (lockJson.packages?.[""]?.version !== undefined) lockJson.packages[""].version = version;
+
+  await writeJson(packagePath, packageJson);
+  await writeJson(lockPath, lockJson);
 }
 
 function writeJson(file, value) {
