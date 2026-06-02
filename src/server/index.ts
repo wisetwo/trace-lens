@@ -1,5 +1,6 @@
 import express from "express";
 import type { Server } from "node:http";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TraceStore, resolveTraceFile } from "./trace-reader.js";
@@ -7,6 +8,7 @@ import { TraceStore, resolveTraceFile } from "./trace-reader.js";
 export interface ServerOptions {
   inputPath: string;
   port: number;
+  basePath?: string;
 }
 
 export interface RunningServer {
@@ -18,8 +20,12 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
   const filePath = await resolveTraceFile(options.inputPath);
   const store = new TraceStore(filePath);
   const app = express();
+  const basePath = options.basePath ?? "";
+  // Normalise: strip trailing slash, ensure leading slash (unless empty).
+  const normalizedBase = basePath.replace(/\/+$/, "");
+  const routePrefix = normalizedBase === "" ? "" : normalizedBase.startsWith("/") ? normalizedBase : `/${normalizedBase}`;
 
-  app.get("/api/graph", async (_req, res) => {
+  app.get(`${routePrefix}/api/graph`, async (_req, res) => {
     try {
       res.json(await store.getGraph());
     } catch (error) {
@@ -27,7 +33,7 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     }
   });
 
-  app.get("/api/entry/:seq", async (req, res) => {
+  app.get(`${routePrefix}/api/entry/:seq`, async (req, res) => {
     const seq = Number.parseInt(req.params.seq, 10);
     if (!Number.isFinite(seq)) {
       res.status(400).json({ error: "Invalid seq" });
@@ -41,7 +47,7 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     res.json({ entry });
   });
 
-  app.post("/api/reload", (_req, res) => {
+  app.post(`${routePrefix}/api/reload`, (_req, res) => {
     store.invalidate();
     res.json({ ok: true });
   });
@@ -49,18 +55,39 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
   const currentFile = fileURLToPath(import.meta.url);
   const serverDir = path.dirname(currentFile);
   const clientDir = path.resolve(serverDir, "../client");
-  app.use(express.static(clientDir));
+
+  // Read the HTML template once at startup so we can inject runtime values.
+  const indexHtmlPath = path.join(clientDir, "index.html");
+  let indexHtmlTemplate: string | null = null;
+  try {
+    indexHtmlTemplate = fs.readFileSync(indexHtmlPath, "utf-8");
+  } catch {
+    // UI bundle not built yet – will fall back to error page below.
+  }
+
+  app.use(routePrefix || "/", express.static(clientDir, { index: false }));
+
+  // SPA fallback – serve index.html with injected base-path globals.
   app.get("*", (_req, res) => {
-    res.sendFile(path.join(clientDir, "index.html"), (error) => {
-      if (error) {
-        res.status(200).send(`
-          <h1>Trace Lens</h1>
-          <p>UI bundle not found. Run <code>npm run build</code> first.</p>
-          <p>Trace file: <code>${path.basename(filePath)}</code></p>
-          <p>Graph API: <a href="/api/graph">/api/graph</a></p>
-        `);
-      }
-    });
+    if (!indexHtmlTemplate) {
+      res.status(200).send(`
+        <h1>Trace Lens</h1>
+        <p>UI bundle not found. Run <code>npm run build</code> first.</p>
+        <p>Trace file: <code>${path.basename(filePath)}</code></p>
+        <p>Graph API: <a href="${routePrefix}/api/graph">${routePrefix}/api/graph</a></p>
+      `);
+      return;
+    }
+
+    const baseTag = basePath ? `<base href="${basePath}">` : "";
+    const globalScript = basePath
+      ? `<script>window.__TRACE_LENS_BASE__ = ${JSON.stringify(basePath.replace(/\/$/, ""))}</script>`
+      : "";
+    const html = indexHtmlTemplate
+      .replace("<head>", `<head>${baseTag}`)
+      .replace(/<script/, `${globalScript}<script`);
+
+    res.type("html").send(html);
   });
 
   const listener = await listenOnAvailablePort(app, options.port);

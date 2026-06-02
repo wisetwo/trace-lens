@@ -10,15 +10,20 @@ program
   .argument("<path>", "Path to a trace JSONL file or a directory containing JSONL files")
   .option("-p, --port <port>", "Port to listen on", "3117")
   .option("--no-open", "Do not open the browser automatically")
-  .action(async (inputPath: string, options: { port: string; open: boolean }) => {
+  .option("--base-path <path>", "Base path for the UI and API (e.g. /proxy/session-123/)", "")
+  .action(async (inputPath: string, options: { port: string; open: boolean; basePath: string }) => {
     const port = Number.parseInt(options.port, 10);
     if (!Number.isFinite(port)) {
       console.error(`Invalid port: ${options.port}`);
       process.exit(1);
     }
 
+    let basePath = options.basePath.trim();
+    if (basePath && !basePath.startsWith("/")) basePath = `/${basePath}`;
+    if (basePath && !basePath.endsWith("/")) basePath = `${basePath}/`;
+
     try {
-      const server = await createServer({ inputPath, port });
+      const server = await createServer({ inputPath, port, basePath });
       console.log(`Trace Lens: ${server.url}`);
       console.log(`Press Ctrl+C to stop.`);
       if (options.open) await open(server.url);

@@ -24,6 +24,17 @@ type DetailState = {
 SyntaxHighlighter.registerLanguage("json", jsonLanguage);
 SyntaxHighlighter.registerLanguage("markdown", markdownLanguage);
 
+declare global {
+  interface Window {
+    __TRACE_LENS_BASE__?: string;
+  }
+}
+
+/** Return the runtime base path injected by the server (empty string when served at root). */
+function getBasePath(): string {
+  return typeof window !== "undefined" && window.__TRACE_LENS_BASE__ ? window.__TRACE_LENS_BASE__ : "";
+}
+
 const nodeTypes = { traceNode: TraceFlowNode };
 const NODE_X_GAP = 285;
 const NODE_Y_GAP = 220;
@@ -183,7 +194,7 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const nextGraph = await fetchJson<AgentTraceGraph>("/api/graph");
+      const nextGraph = await fetchJson<AgentTraceGraph>(`${getBasePath()}/api/graph`);
       setGraph(nextGraph);
       setEnabledAgents(new Set(nextGraph.agents.map((agent) => agent.id)));
     } catch (err) {
@@ -201,7 +212,7 @@ export function App() {
     const traceNode = node.data as unknown as TraceNode;
     setDetail({ node: traceNode, loading: true });
     try {
-      const payload = await fetchJson<{ entry: TraceEntry }>(`/api/entry/${traceNode.seq}`);
+      const payload = await fetchJson<{ entry: TraceEntry }>(`${getBasePath()}/api/entry/${traceNode.seq}`);
       setDetail({ node: traceNode, entry: payload.entry, loading: false });
     } catch (err) {
       setDetail({ node: traceNode, loading: false, error: err instanceof Error ? err.message : String(err) });
