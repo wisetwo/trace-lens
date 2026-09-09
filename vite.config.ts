@@ -1,6 +1,8 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+const apiPort = process.env.TRACE_LENS_API_PORT || "3117";
+
 export default defineConfig({
   plugins: [react()],
   base: "./",
@@ -11,7 +13,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:3117",
+      "/api": `http://localhost:${apiPort}`,
     },
   },
 });

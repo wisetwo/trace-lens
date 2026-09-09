@@ -43,6 +43,7 @@ trace-lens ./logs/trace.jsonl --no-open
 | Option | Description | Default |
 | ------ | ----------- | ------- |
 | `<path>` | Path to a trace `.jsonl` file or a directory containing `.jsonl` files | — |
+| `-v, --version` | Print version number | — |
 | `-p, --port <port>` | Port to listen on | `3117` |
 | `--no-open` | Do not open the browser automatically | `false` |
 

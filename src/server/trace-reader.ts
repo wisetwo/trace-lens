@@ -22,6 +22,10 @@ function parseTraceLine(line: string): TraceEntry | null {
   }
 }
 
+function isTraceEntry(value: unknown): value is TraceEntry {
+  return value != null && typeof value === "object" && typeof (value as { seq?: unknown }).seq === "number";
+}
+
 export async function resolveTraceFile(inputPath: string): Promise<string> {
   const resolved = path.resolve(inputPath);
   const stat = await fs.stat(resolved).catch(() => null);
@@ -46,6 +50,13 @@ export async function resolveTraceFile(inputPath: string): Promise<string> {
 
 export async function readTraceEntries(file: string): Promise<TraceEntry[]> {
   const content = await fs.readFile(file, "utf8").catch(() => "");
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    const entries = Array.isArray(parsed) ? parsed.filter(isTraceEntry) : isTraceEntry(parsed) ? [parsed] : [];
+    if (entries.length) return entries.sort((a, b) => a.seq - b.seq);
+  } catch {
+    // Fall through to JSONL parsing.
+  }
   return content
     .split("\n")
     .map(parseTraceLine)

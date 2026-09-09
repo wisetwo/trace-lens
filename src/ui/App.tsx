@@ -21,6 +21,11 @@ type DetailState = {
   error?: string;
 };
 
+type DownloadOptions = {
+  includeFullSystemPrompts: boolean;
+  includeFullToolDefinitions: boolean;
+};
+
 SyntaxHighlighter.registerLanguage("json", jsonLanguage);
 SyntaxHighlighter.registerLanguage("markdown", markdownLanguage);
 
@@ -41,6 +46,7 @@ const NODE_Y_GAP = 220;
 const NODE_X_START = 80;
 const NODE_Y_START = 72;
 const COLLAPSED_BLOCK_HEIGHT = 260;
+const SYSTEM_PROMPT_MAX_CHARS = 6000;
 
 function roleColor(agentId: string): string {
   if (agentId.startsWith("lead")) return "#3b82f6";
@@ -146,12 +152,77 @@ async function fetchJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function downloadJson(entry: TraceEntry) {
-  const blob = new Blob([JSON.stringify(entry, null, 2)], { type: "application/json" });
+function truncateSystemPromptValue(value: unknown, state: { truncated: boolean }): unknown {
+  if (typeof value === "string") {
+    if (value.length <= SYSTEM_PROMPT_MAX_CHARS) return value;
+    state.truncated = true;
+    const omittedChars = value.length - SYSTEM_PROMPT_MAX_CHARS;
+    return `${value.slice(0, SYSTEM_PROMPT_MAX_CHARS)}\n\n\n==================== SYSTEM PROMPT TRUNCATED ====================\n${omittedChars} characters were omitted from this point onward.\nUse the visible keywords to locate the omitted instructions in the repository if needed.\n=================================================================`;
+  }
+  if (Array.isArray(value)) return value.map((item) => truncateSystemPromptValue(item, state));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, truncateSystemPromptValue(item, state)]));
+  }
+  return value;
+}
+
+function makeDownloadEntry(entry: TraceEntry, options: DownloadOptions): TraceEntry {
+  if (options.includeFullSystemPrompts && options.includeFullToolDefinitions) return entry;
+
+  const output: TraceEntry = { ...entry };
+  const systemState = { truncated: false };
+  let strippedToolDefinitions = false;
+
+  if (!options.includeFullSystemPrompts) {
+    if (output.system != null) output.system = truncateSystemPromptValue(output.system, systemState);
+    if (output.messages) {
+      output.messages = output.messages.map((message) => (
+        message.role === "system"
+          ? { ...message, content: truncateSystemPromptValue(message.content, systemState) }
+          : message
+      ));
+    }
+  }
+
+  if (!options.includeFullToolDefinitions && output.tools) {
+    output.tools = output.tools.map((tool) => {
+      const { description: _description, parameters: _parameters, ...summary } = tool;
+      if (_description != null || _parameters != null) strippedToolDefinitions = true;
+      return summary as TraceToolDef;
+    });
+  }
+
+  output._traceLensExport = {
+    optimizedFor: "AI analysis",
+    systemPrompts: options.includeFullSystemPrompts
+      ? "included in full"
+      : systemState.truncated
+        ? `truncated to ${SYSTEM_PROMPT_MAX_CHARS} characters per text block; each truncated block ends with a prominent marker`
+        : "included in full because all system prompt text was below the truncation limit",
+    toolDefinitions: options.includeFullToolDefinitions
+      ? "descriptions and parameters included"
+      : strippedToolDefinitions
+        ? "descriptions and parameters omitted; tool names and other metadata retained"
+        : "no descriptions or parameters were present",
+  };
+  return output;
+}
+
+function downloadJson(entry: TraceEntry, options: DownloadOptions) {
+  const isFullDownload = options.includeFullSystemPrompts && options.includeFullToolDefinitions;
+  const blob = new Blob([JSON.stringify(makeDownloadEntry(entry, options), null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
+  const now = new Date();
+  const timestamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
   anchor.href = url;
-  anchor.download = `trace-${entry.seq}.json`;
+  anchor.download = `trace-${entry.seq}-${isFullDownload ? "full" : "ai"}-${timestamp}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
 }
@@ -278,6 +349,18 @@ export function App() {
 }
 
 function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose: () => void }) {
+  const [showDownloadOptions, setShowDownloadOptions] = useState(false);
+  const [downloadOptions, setDownloadOptions] = useState<DownloadOptions>({
+    includeFullSystemPrompts: false,
+    includeFullToolDefinitions: false,
+  });
+  useEffect(() => {
+    setShowDownloadOptions(false);
+    setDownloadOptions({
+      includeFullSystemPrompts: false,
+      includeFullToolDefinitions: false,
+    });
+  }, [detail?.node.id]);
   if (!detail) return null;
   const { node, entry, loading, error } = detail;
   const systemContent = typeof entry?.system === "string" ? entry.system : entry?.system != null ? JSON.stringify(entry.system, null, 2) : null;
@@ -295,7 +378,57 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
             <p>{new Date(node.ts).toLocaleString()}</p>
           </div>
           <div className="detail-actions">
-            {entry ? <button className="button small" onClick={() => downloadJson(entry)}>Download</button> : null}
+            {entry ? (
+              <div className="download-menu">
+                <button
+                  className="button small"
+                  aria-expanded={showDownloadOptions}
+                  onClick={() => setShowDownloadOptions((value) => !value)}
+                >
+                  Download JSON {showDownloadOptions ? "▴" : "▾"}
+                </button>
+                {showDownloadOptions ? (
+                  <div className="download-options">
+                    <strong>Download options</strong>
+                    <p>Defaults are optimized to reduce noise during AI analysis.</p>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={downloadOptions.includeFullSystemPrompts}
+                        onChange={(event) => setDownloadOptions((current) => ({ ...current, includeFullSystemPrompts: event.target.checked }))}
+                      />
+                      <span>
+                        Include full system prompts
+                        <small>Otherwise text over {SYSTEM_PROMPT_MAX_CHARS.toLocaleString()} characters is truncated and marked.</small>
+                      </span>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={downloadOptions.includeFullToolDefinitions}
+                        onChange={(event) => setDownloadOptions((current) => ({ ...current, includeFullToolDefinitions: event.target.checked }))}
+                      />
+                      <span>
+                        Include tool descriptions and parameters
+                        <small>Otherwise tool names and other compact metadata are retained.</small>
+                      </span>
+                    </label>
+                    <div className="download-option-actions">
+                      <button className="button small" onClick={() => setShowDownloadOptions(false)}>Cancel</button>
+                      <button
+                        className="button small primary"
+                        onClick={() => {
+                          downloadJson(entry, downloadOptions);
+                          setShowDownloadOptions(false);
+                        }}
+                      >
+                        Download JSON
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <button className="icon-button" onClick={onClose}>×</button>
           </div>
         </div>

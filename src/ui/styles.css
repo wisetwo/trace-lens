@@ -52,6 +52,17 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .detail-title-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .detail-header p { margin: 10px 0 0; color: #64748b; font-size: 12px; }
 .detail-actions { display: flex; gap: 10px; align-items: center; }
+.download-menu { position: relative; }
+.download-options {
+  position: absolute; z-index: 2; top: calc(100% + 8px); right: 0; width: 380px; padding: 14px;
+  border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; box-shadow: 0 18px 48px rgba(15,23,42,.2);
+}
+.download-options strong { display: block; font-size: 13px; }
+.download-options > p { margin: 5px 0 12px; line-height: 1.4; }
+.download-options label { display: grid; grid-template-columns: 18px 1fr; gap: 9px; align-items: start; padding: 9px 0; cursor: pointer; font-size: 12px; font-weight: 700; }
+.download-options input { margin: 2px 0 0; }
+.download-options label small { display: block; margin-top: 4px; color: #64748b; font-size: 11px; font-weight: 400; line-height: 1.4; }
+.download-option-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
 .detail-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 22px 28px; }
 .seq-badge, .raw-seq-badge, .session-badge, .stage-badge { border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 800; }
 .seq-badge { background: #dbeafe; color: #1d4ed8; }
@@ -123,7 +134,9 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 
 .button { border: 1px solid #cbd5e1; background: #fff; color: #0f172a; border-radius: 10px; padding: 8px 12px; cursor: pointer; }
 .button.small { padding: 6px 9px; font-size: 12px; }
+.button.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
 .button:hover, .icon-button:hover { background: #f8fafc; }
+.button.primary:hover { background: #1d4ed8; }
 .error-banner { margin: 10px 14px 0; padding: 10px 12px; border-radius: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; font-size: 13px; }
 .error-banner.small { margin: 10px 0 18px; }
 .muted { color: #94a3b8; font-size: 12px; }

@@ -19,7 +19,9 @@ const next = nextVersion(current, bump);
 await updateVersion(next);
 
 const npmPublishArgs = ["publish", ...publishArgs];
-if (!publishArgs.includes("--access") && !publishArgs.some((arg) => arg.startsWith("--access="))) {
+const hasAccessArg = publishArgs.includes("--access") || publishArgs.some((arg) => arg.startsWith("--access="));
+const usesCustomRegistry = Boolean(packageJson.publishConfig?.registry) || publishArgs.some((arg) => arg === "--registry" || arg.startsWith("--registry="));
+if (!hasAccessArg && !packageJson.publishConfig?.access && !usesCustomRegistry) {
   npmPublishArgs.splice(1, 0, "--access", "public");
 }
 

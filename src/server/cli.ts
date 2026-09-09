@@ -1,12 +1,17 @@
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import open from "open";
 import { createServer } from "./index.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../../package.json") as { version: string };
 
 const program = new Command();
 
 program
   .name("trace-lens")
   .description("View multi-agent LLM JSONL traces as an interactive graph")
+  .version(version, "-v, --version", "Print version number")
   .argument("<path>", "Path to a trace JSONL file or a directory containing JSONL files")
   .option("-p, --port <port>", "Port to listen on", "3117")
   .option("--no-open", "Do not open the browser automatically")

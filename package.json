@@ -1,6 +1,6 @@
 {
   "name": "@wisetwo/trace-lens",
-  "version": "0.1.2",
+  "version": "0.1.8",
   "description": "Interactive graph viewer for multi-agent LLM trace logs",
   "license": "MIT",
   "type": "module",
@@ -19,6 +19,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "prepack": "npm run build",
     "dev": "vite",
+    "dev:sample": "npm run build:server && node scripts/dev-sample.mjs",
     "release": "node scripts/release.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
