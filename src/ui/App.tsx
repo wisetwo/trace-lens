@@ -7,11 +7,12 @@ import {
   type Node as FlowNode,
   type NodeProps,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import jsonLanguage from "react-syntax-highlighter/dist/esm/languages/prism/json";
 import markdownLanguage from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { exportBaseName } from "../shared/export-name.js";
 import type { AgentTraceGraph, TraceEdge, TraceEntry, TraceMessage, TraceNode, TraceToolDef } from "../shared/types.js";
 
 type DetailState = {
@@ -213,16 +214,9 @@ function downloadJson(entry: TraceEntry, options: DownloadOptions) {
   const blob = new Blob([JSON.stringify(makeDownloadEntry(entry, options), null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  const now = new Date();
-  const timestamp = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-  ].join("");
+  const kind = isFullDownload ? "full" : "ai";
   anchor.href = url;
-  anchor.download = `trace-${entry.seq}-${isFullDownload ? "full" : "ai"}-${timestamp}.json`;
+  anchor.download = `${exportBaseName(entry.seq, new Date(), kind)}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
 }
@@ -254,41 +248,161 @@ function detectLanguage(text: string, explicit?: string): string {
   return "text";
 }
 
+interface TraceFileInfo {
+  name: string;
+  mtimeMs: number;
+  size: number;
+  title?: string;
+  lastUser?: string;
+  userTurns?: number;
+  entries?: number;
+  messages?: number;
+  agents?: number;
+  models?: string[];
+  errors?: number;
+}
+
+function formatFileTime(mtimeMs: number): string {
+  const date = new Date(mtimeMs);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : date.toLocaleString();
+}
+
+const SessionList = memo(function SessionList({ files, selected, onSelect }: { files: TraceFileInfo[]; selected: string; onSelect: (name: string) => void }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? files.filter((file) => [file.title, file.lastUser, file.name, ...(file.models ?? [])].some((text) => text?.toLowerCase().includes(needle)))
+    : files;
+  const active = selected || files[0]?.name;
+  return (
+    <div className="panel sessions-panel">
+      <h2>Sessions <small className="muted">{files.length}</small></h2>
+      <input className="session-search" placeholder="Search messages, models, files…" value={query} onChange={(event) => setQuery(event.target.value)} />
+      <button className={`session-item follow ${selected === "" ? "active" : ""}`} onClick={() => onSelect("")}>
+        <span className="session-title">Follow latest</span>
+        <span className="session-meta">Always show the newest session</span>
+      </button>
+      <div className="session-list">
+        {visible.map((file) => (
+          <button
+            key={file.name}
+            className={`session-item ${file.name === active ? "active" : ""} ${selected === file.name ? "pinned" : ""}`}
+            title={file.name}
+            onClick={() => onSelect(file.name)}
+          >
+            <span className="session-title">{file.title || file.name}</span>
+            {file.lastUser ? <span className="session-last">↳ {file.lastUser}</span> : null}
+            <span className="session-meta">
+              {formatFileTime(file.mtimeMs)}
+              {file.userTurns !== undefined ? ` · ${file.userTurns} user` : ""}
+              {file.messages !== undefined ? ` · ${file.messages} msgs` : ""}
+              {file.entries !== undefined ? ` · ${file.entries} calls` : ""}
+              {file.agents && file.agents > 1 ? ` · ${file.agents} agents` : ""}
+              {file.errors ? <span className="session-error"> · {file.errors} err</span> : null}
+            </span>
+          </button>
+        ))}
+        {!visible.length ? <p className="muted">{files.length ? "No match" : "No sessions captured yet"}</p> : null}
+      </div>
+    </div>
+  );
+});
+
+function initialSelectedFile(): string {
+  return typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("file") ?? "" : "";
+}
+
+function fileQuery(file: string | null | undefined): string {
+  return file ? `?file=${encodeURIComponent(file)}` : "";
+}
+
 export function App() {
   const [graph, setGraph] = useState<AgentTraceGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [enabledAgents, setEnabledAgents] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<DetailState | null>(null);
+  const [files, setFiles] = useState<TraceFileInfo[]>([]);
+  const [directoryMode, setDirectoryMode] = useState(false);
+  // "" follows the newest file in directory mode.
+  const [selectedFile, setSelectedFile] = useState<string>(initialSelectedFile);
+  const [live, setLive] = useState(true);
+  const disabledAgents = useRef<Set<string>>(new Set());
+  const lastVersion = useRef<string>("");
 
-  const loadGraph = useCallback(async () => {
-    setLoading(true);
+  const filesVersion = useRef<string>("");
+  const loadFiles = useCallback(async () => {
+    const payload = await fetchJson<{ directory: boolean; files: TraceFileInfo[] }>(`${getBasePath()}/api/files`);
+    // Skip the state update when nothing changed so polling does not re-render the page.
+    const version = payload.files.map((file) => `${file.name}:${file.mtimeMs}:${file.size}`).join("|");
+    if (version !== filesVersion.current) {
+      filesVersion.current = version;
+      setFiles(payload.files);
+    }
+    setDirectoryMode(payload.directory);
+    return payload.files;
+  }, []);
+
+  const loadGraph = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     setError(null);
     try {
-      const nextGraph = await fetchJson<AgentTraceGraph>(`${getBasePath()}/api/graph`);
+      const nextGraph = await fetchJson<AgentTraceGraph>(`${getBasePath()}/api/graph${fileQuery(selectedFile)}`);
       setGraph(nextGraph);
-      setEnabledAgents(new Set(nextGraph.agents.map((agent) => agent.id)));
+      setEnabledAgents(new Set(nextGraph.agents.map((agent) => agent.id).filter((id) => !disabledAgents.current.has(id))));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
-  }, []);
+  }, [selectedFile]);
 
-  useEffect(() => { void loadGraph(); }, [loadGraph]);
+  const refresh = useCallback(async () => {
+    const list = await loadFiles().catch(() => [] as TraceFileInfo[]);
+    const current = selectedFile ? list.find((file) => file.name === selectedFile) : list[0];
+    lastVersion.current = current ? `${current.name}:${current.mtimeMs}:${current.size}` : "";
+    await loadGraph();
+  }, [loadFiles, loadGraph, selectedFile]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (selectedFile) url.searchParams.set("file", selectedFile);
+    else url.searchParams.delete("file");
+    window.history.replaceState(null, "", url);
+  }, [selectedFile]);
+
+  useEffect(() => {
+    if (!live || !directoryMode) return;
+    const timer = window.setInterval(() => {
+      void loadFiles().then((list) => {
+        const current = selectedFile ? list.find((file) => file.name === selectedFile) : list[0];
+        const version = current ? `${current.name}:${current.mtimeMs}:${current.size}` : "";
+        if (version !== lastVersion.current) {
+          lastVersion.current = version;
+          void loadGraph(true);
+        }
+      }).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [live, directoryMode, selectedFile, loadFiles, loadGraph]);
 
   const flow = useMemo(() => (graph ? makeFlow(graph, enabledAgents) : { nodes: [], edges: [] }), [graph, enabledAgents]);
+  const graphFile = directoryMode ? graph?.file : undefined;
 
   const handleNodeClick = useCallback(async (_event: unknown, node: FlowNode) => {
     const traceNode = node.data as unknown as TraceNode;
     setDetail({ node: traceNode, loading: true });
     try {
-      const payload = await fetchJson<{ entry: TraceEntry }>(`${getBasePath()}/api/entry/${traceNode.seq}`);
+      const payload = await fetchJson<{ entry: TraceEntry }>(`${getBasePath()}/api/entry/${traceNode.seq}${fileQuery(graphFile)}`);
       setDetail({ node: traceNode, entry: payload.entry, loading: false });
     } catch (err) {
       setDetail({ node: traceNode, loading: false, error: err instanceof Error ? err.message : String(err) });
     }
-  }, []);
+  }, [graphFile]);
+  const closeDetail = useCallback(() => setDetail(null), []);
 
   return (
     <div className="app-shell">
@@ -297,13 +411,21 @@ export function App() {
           <h1>Trace Lens</h1>
           <p>{graph ? graph.file : "Loading trace graph..."}</p>
         </div>
-        <button className="button" onClick={() => void loadGraph()}>Refresh</button>
+        <div className="header-actions">
+          {directoryMode ? (
+            <label className="live-toggle" title="Poll for new captures every 3 seconds">
+              <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Live
+            </label>
+          ) : null}
+          <button className="button" onClick={() => void refresh()}>Refresh</button>
+        </div>
       </header>
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <main className="app-main">
+      <main className={`app-main ${directoryMode ? "with-sessions" : ""}`}>
         <aside className="sidebar">
+          {directoryMode ? <SessionList files={files} selected={selectedFile} onSelect={setSelectedFile} /> : null}
           <div className="panel">
             <h2>Agents</h2>
             {loading ? <p className="muted">Loading...</p> : null}
@@ -314,8 +436,13 @@ export function App() {
                   checked={enabledAgents.has(agent.id)}
                   onChange={(event) => {
                     const next = new Set(enabledAgents);
-                    if (event.target.checked) next.add(agent.id);
-                    else next.delete(agent.id);
+                    if (event.target.checked) {
+                      next.add(agent.id);
+                      disabledAgents.current.delete(agent.id);
+                    } else {
+                      next.delete(agent.id);
+                      disabledAgents.current.add(agent.id);
+                    }
                     setEnabledAgents(next);
                   }}
                 />
@@ -342,24 +469,28 @@ export function App() {
           </ReactFlow>
         </section>
 
-        <DetailPanel detail={detail} onClose={() => setDetail(null)} />
+        <DetailPanel detail={detail} file={graphFile} onClose={closeDetail} />
       </main>
     </div>
   );
 }
 
-function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose: () => void }) {
+const DetailPanel = memo(function DetailPanel({ detail, file, onClose }: { detail: DetailState | null; file?: string; onClose: () => void }) {
   const [showDownloadOptions, setShowDownloadOptions] = useState(false);
   const [downloadOptions, setDownloadOptions] = useState<DownloadOptions>({
-    includeFullSystemPrompts: false,
-    includeFullToolDefinitions: false,
+    includeFullSystemPrompts: true,
+    includeFullToolDefinitions: true,
   });
+  const [organizeNote, setOrganizeNote] = useState<{ error: boolean; message: string } | null>(null);
+  const [organizing, setOrganizing] = useState(false);
   useEffect(() => {
     setShowDownloadOptions(false);
     setDownloadOptions({
-      includeFullSystemPrompts: false,
-      includeFullToolDefinitions: false,
+      includeFullSystemPrompts: true,
+      includeFullToolDefinitions: true,
     });
+    setOrganizeNote(null);
+    setOrganizing(false);
   }, [detail?.node.id]);
   if (!detail) return null;
   const { node, entry, loading, error } = detail;
@@ -379,6 +510,30 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
           </div>
           <div className="detail-actions">
             {entry ? (
+              <button
+                className="button small"
+                title="Write an agent-readable directory next to the trace file. index.md is the overview; long tool results and inputs go in files/."
+                disabled={organizing}
+                onClick={() => {
+                  setOrganizing(true);
+                  setOrganizeNote(null);
+                  void fetchJson<{ directory: string; mainFile: string }>(`${getBasePath()}/api/entry/${entry.seq}/organize${fileQuery(file)}`)
+                    .then((result) => {
+                      setOrganizeNote({
+                        error: false,
+                        message: `Wrote ${result.directory} — open ${result.mainFile}. Long tool results and inputs are in files/ beside it.`,
+                      });
+                    })
+                    .catch((err: unknown) => {
+                      setOrganizeNote({ error: true, message: err instanceof Error ? err.message : String(err) });
+                    })
+                    .finally(() => setOrganizing(false));
+                }}
+              >
+                {organizing ? "Organizing…" : "Organize"}
+              </button>
+            ) : null}
+            {entry ? (
               <div className="download-menu">
                 <button
                   className="button small"
@@ -390,7 +545,7 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
                 {showDownloadOptions ? (
                   <div className="download-options">
                     <strong>Download options</strong>
-                    <p>Defaults are optimized to reduce noise during AI analysis.</p>
+                    <p>Downloads the complete entry. Uncheck an option to leave that part out.</p>
                     <label>
                       <input
                         type="checkbox"
@@ -399,7 +554,7 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
                       />
                       <span>
                         Include full system prompts
-                        <small>Otherwise text over {SYSTEM_PROMPT_MAX_CHARS.toLocaleString()} characters is truncated and marked.</small>
+                        <small>Uncheck to truncate each text block after {SYSTEM_PROMPT_MAX_CHARS.toLocaleString()} characters.</small>
                       </span>
                     </label>
                     <label>
@@ -410,7 +565,7 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
                       />
                       <span>
                         Include tool descriptions and parameters
-                        <small>Otherwise tool names and other compact metadata are retained.</small>
+                        <small>Uncheck to keep tool names and other compact metadata only.</small>
                       </span>
                     </label>
                     <div className="download-option-actions">
@@ -434,6 +589,7 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
         </div>
 
         <div className="detail-body">
+          {organizeNote ? <p className={`organize-note${organizeNote.error ? " error" : ""}`}>{organizeNote.message}</p> : null}
           <section className="trace-meta-section">
             <Meta label="Turn" value={node.turnId || String(node.agentSeq)} />
             <Meta label="Raw Seq" value={`#${node.seq}`} />
@@ -453,15 +609,44 @@ function DetailPanel({ detail, onClose }: { detail: DetailState | null; onClose:
           {entry?.prompt ? <FlatSection title="Prompt"><CollapsiblePre text={entry.prompt} language={detectLanguage(entry.prompt)} /></FlatSection> : null}
           {entry?.messages?.length ? (
             <FlatSection title={`Messages (${entry.messages.length})`}>
-              <div className="messages-list">{entry.messages.map((message, index) => <MessageCard key={index} message={message} index={index} />)}</div>
+              <MessageList key={node.id} messages={entry.messages} />
             </FlatSection>
           ) : null}
           {entry?.tools?.length ? <FlatSection title={`Tools (${entry.tools.length})`}><ToolList tools={entry.tools} /></FlatSection> : null}
           {entry?.error ? <FlatSection title="Error"><CollapsibleBlock className="content-block error-block">{entry.error}</CollapsibleBlock></FlatSection> : null}
-          {entry ? <details className="raw-details"><summary>Raw JSON</summary><CollapsiblePre text={JSON.stringify(entry, null, 2)} language="json" dark /></details> : null}
+          {entry ? <RawJson key={node.id} entry={entry} /> : null}
         </div>
       </aside>
     </div>
+  );
+});
+
+const INITIAL_VISIBLE_MESSAGES = 40;
+
+/** Long histories render only the most recent messages until asked; each message is a full highlighted block. */
+function MessageList({ messages }: { messages: TraceMessage[] }) {
+  const [showAll, setShowAll] = useState(messages.length <= INITIAL_VISIBLE_MESSAGES);
+  const start = showAll ? 0 : messages.length - INITIAL_VISIBLE_MESSAGES;
+  return (
+    <div className="messages-list">
+      {start > 0 ? (
+        <button className="button small show-earlier" onClick={() => setShowAll(true)}>
+          Show {start} earlier messages
+        </button>
+      ) : null}
+      {messages.slice(start).map((message, offset) => <MessageCard key={start + offset} message={message} index={start + offset} />)}
+    </div>
+  );
+}
+
+function RawJson({ entry }: { entry: TraceEntry }) {
+  const [open, setOpen] = useState(false);
+  const text = useMemo(() => (open ? JSON.stringify(entry, null, 2) : ""), [open, entry]);
+  return (
+    <details className="raw-details" onToggle={(event) => setOpen((event.target as HTMLDetailsElement).open)}>
+      <summary>Raw JSON</summary>
+      {open ? <CollapsiblePre text={text} language="json" dark /> : null}
+    </details>
   );
 }
 
@@ -474,29 +659,43 @@ function FlatSection({ title, children }: { title: string; children: ReactNode }
   return <section className="flat-section"><h3>{title}</h3>{children}</section>;
 }
 
-function CollapsibleBlock({ children, className = "", defaultExpanded = false }: { children: ReactNode; className?: string; defaultExpanded?: boolean }) {
+function CollapsibleBlock({
+  children,
+  className = "",
+  defaultExpanded = false,
+}: {
+  children: ReactNode | ((expanded: boolean) => ReactNode);
+  className?: string;
+  defaultExpanded?: boolean;
+}) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [measuredHeight, setMeasuredHeight] = useState(COLLAPSED_BLOCK_HEIGHT);
   const outerRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
 
+  // The ResizeObserver already tracks content changes, so this only needs to run once.
   useEffect(() => {
     const outer = outerRef.current;
     const inner = innerRef.current;
     if (!outer || !inner) return;
 
+    let frame = 0;
     const measure = () => {
-      requestAnimationFrame(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
         const nextHeight = Math.max(COLLAPSED_BLOCK_HEIGHT, outer.scrollHeight + 8);
-        setMeasuredHeight(nextHeight);
+        setMeasuredHeight((current) => (current === nextHeight ? current : nextHeight));
       });
     };
     measure();
 
     const observer = new ResizeObserver(measure);
     observer.observe(inner);
-    return () => observer.disconnect();
-  }, [children]);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
 
   const canExpand = measuredHeight > COLLAPSED_BLOCK_HEIGHT + 12;
   const toggle = () => {
@@ -520,7 +719,7 @@ function CollapsibleBlock({ children, className = "", defaultExpanded = false }:
         }}
       >
         <div ref={innerRef} className="collapsible-inner">
-          {children}
+          {typeof children === "function" ? children(expanded) : children}
         </div>
       </div>
       {canExpand ? <div className="expand-hint">{expanded ? "Double-click content to collapse ↑" : "Double-click content to expand ↓"}</div> : null}
@@ -528,29 +727,62 @@ function CollapsibleBlock({ children, className = "", defaultExpanded = false }:
   );
 }
 
+/** Collapsed blocks only show ~260px, so they render a plain-text preview instead of highlighting everything. */
+const COLLAPSED_PREVIEW_CHARS = 3000;
+/** Prism output for very large texts is tens of thousands of spans; show those as plain text even when expanded. */
+const MAX_HIGHLIGHT_CHARS = 8000;
+
+const PRE_STYLE = {
+  margin: 0,
+  padding: 0,
+  background: "transparent",
+  fontSize: 12,
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  overflowWrap: "anywhere",
+  overflowX: "hidden",
+} as const;
+const CODE_TAG_PROPS = { style: { whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "anywhere" } as const };
+const TEXT_STYLE = { margin: 0, padding: 0, background: "transparent", fontSize: 12, lineHeight: 1.5 } as const;
+
+const HighlightedText = memo(function HighlightedText({
+  text,
+  language,
+  dark = false,
+  expanded,
+  wrapCode = false,
+}: {
+  text: string;
+  language?: string;
+  dark?: boolean;
+  expanded: boolean;
+  wrapCode?: boolean;
+}) {
+  const detectedLanguage = useMemo(() => detectLanguage(text, language), [text, language]);
+  if (!expanded && text.length > COLLAPSED_PREVIEW_CHARS) {
+    return <pre className="plain-pre" style={wrapCode ? PRE_STYLE : TEXT_STYLE}>{text.slice(0, COLLAPSED_PREVIEW_CHARS)}</pre>;
+  }
+  if (text.length > MAX_HIGHLIGHT_CHARS) {
+    return <pre className="plain-pre" style={PRE_STYLE}>{text}</pre>;
+  }
+  return (
+    <SyntaxHighlighter
+      language={detectedLanguage}
+      style={dark ? oneDark : oneLight}
+      customStyle={wrapCode ? PRE_STYLE : TEXT_STYLE}
+      codeTagProps={wrapCode ? CODE_TAG_PROPS : undefined}
+      wrapLongLines
+    >
+      {text}
+    </SyntaxHighlighter>
+  );
+});
+
 function CollapsiblePre({ text, dark = false, language }: { text: string; dark?: boolean; language?: string }) {
-  const detectedLanguage = detectLanguage(text, language);
   return (
     <CollapsibleBlock className={`content-block highlighted-code ${dark ? "json-block" : ""}`}>
-      <SyntaxHighlighter
-        language={detectedLanguage}
-        style={dark ? oneDark : oneLight}
-        customStyle={{
-          margin: 0,
-          padding: 0,
-          background: "transparent",
-          fontSize: 12,
-          lineHeight: 1.5,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          overflowWrap: "anywhere",
-          overflowX: "hidden",
-        }}
-        codeTagProps={{ style: { whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "anywhere" } }}
-        wrapLongLines
-      >
-        {text}
-      </SyntaxHighlighter>
+      {(expanded) => <HighlightedText text={text} language={language} dark={dark} expanded={expanded} wrapCode />}
     </CollapsibleBlock>
   );
 }
@@ -602,15 +834,12 @@ function ContentView({ value }: { value: unknown }) {
 function TextBlock({ text, label, variant }: { text: string; label?: string; variant?: "thinking" }) {
   return (
     <CollapsibleBlock className={`content-block text-block highlighted-code ${variant || ""}`}>
-      {label ? <span className="content-type">{label}</span> : null}
-      <SyntaxHighlighter
-        language={detectLanguage(text)}
-        style={oneLight}
-        customStyle={{ margin: 0, padding: 0, background: "transparent", fontSize: 12, lineHeight: 1.5 }}
-        wrapLongLines
-      >
-        {text}
-      </SyntaxHighlighter>
+      {(expanded) => (
+        <>
+          {label ? <span className="content-type">{label}</span> : null}
+          <HighlightedText text={text} expanded={expanded} />
+        </>
+      )}
     </CollapsibleBlock>
   );
 }

@@ -10,13 +10,13 @@ import type {
   TraceMessage,
   TraceNode,
 } from "../shared/types.js";
+import { hydrateLines } from "./compact-format.js";
 
-function parseTraceLine(line: string): TraceEntry | null {
+function parseLine(line: string): unknown {
   const trimmed = line.trim();
   if (!trimmed) return null;
   try {
-    const obj = JSON.parse(trimmed) as TraceEntry;
-    return obj && typeof obj === "object" && typeof obj.seq === "number" ? obj : null;
+    return JSON.parse(trimmed) as unknown;
   } catch {
     return null;
   }
@@ -57,11 +57,7 @@ export async function readTraceEntries(file: string): Promise<TraceEntry[]> {
   } catch {
     // Fall through to JSONL parsing.
   }
-  return content
-    .split("\n")
-    .map(parseTraceLine)
-    .filter((entry): entry is TraceEntry => entry !== null)
-    .sort((a, b) => a.seq - b.seq);
+  return hydrateLines(content.split("\n").map(parseLine)).sort((a, b) => a.seq - b.seq);
 }
 
 function roleOf(agentId: string, explicit?: string): AgentRole {
@@ -124,8 +120,8 @@ function lastAssistantMessage(entry: TraceEntry): TraceMessage | undefined {
   return undefined;
 }
 
-function hasTaskResult(entry: TraceEntry | undefined, toolCallId: string): boolean {
-  return (entry?.messages ?? []).some((message) => message.role === "toolResult" && message.name === "task" && message.toolCallId === toolCallId);
+function hasTaskResult(entry: TraceEntry | undefined, toolCallId: string, anyTool = false): boolean {
+  return (entry?.messages ?? []).some((message) => message.role === "toolResult" && (anyTool || message.name === "task") && message.toolCallId === toolCallId);
 }
 
 function visibleEntries(entries: TraceEntry[]): TraceEntry[] {
@@ -152,6 +148,7 @@ export function buildGraph(file: string, entries: TraceEntry[]): AgentTraceGraph
   const edges: TraceEdge[] = [];
   const lastNodeByAgent = new Map<string, TraceNode>();
   const taskCallById = new Map<string, { sourceNode: TraceNode; call: ToolCallSummary }>();
+  const toolCallById = new Map<string, { sourceNode: TraceNode; call: ToolCallSummary }>();
 
   for (const entry of visible) {
     const agentId = entryAgentId(entry);
@@ -214,6 +211,7 @@ export function buildGraph(file: string, entries: TraceEntry[]): AgentTraceGraph
     lastNodeByAgent.set(agentId, node);
 
     for (const call of toolCalls) {
+      toolCallById.set(call.id, { sourceNode: node, call });
       if (call.name === "task") taskCallById.set(call.id, { sourceNode: node, call });
     }
   }
@@ -226,7 +224,7 @@ export function buildGraph(file: string, entries: TraceEntry[]): AgentTraceGraph
       .filter((node) => node.agentId === subAgent.id)
       .sort((a, b) => a.seq - b.seq)[0];
     if (!firstSubNode?.parentToolCallId) continue;
-    const task = taskCallById.get(firstSubNode.parentToolCallId);
+    const task = toolCallById.get(firstSubNode.parentToolCallId);
     if (task) {
       edges.push({
         id: `spawn:${firstSubNode.parentToolCallId}:${firstSubNode.id}`,
@@ -245,7 +243,11 @@ export function buildGraph(file: string, entries: TraceEntry[]): AgentTraceGraph
     if (!firstSubNode || !lastSubNode) continue;
     const parentToolCallId = firstSubNode.parentToolCallId;
     if (!parentToolCallId) continue;
-    const resultNode = nodes.find((node) => node.seq > lastSubNode.seq && hasTaskResult(entriesBySeq.get(node.seq), parentToolCallId));
+    const parentAgentId = firstSubNode.parentAgentId ?? toolCallById.get(parentToolCallId)?.sourceNode.agentId;
+    const resultNode = nodes.find((node) =>
+      node.seq > lastSubNode.seq
+      && (!parentAgentId || node.agentId === parentAgentId)
+      && hasTaskResult(entriesBySeq.get(node.seq), parentToolCallId, true));
     if (resultNode) {
       edges.push({
         id: `result:${lastSubNode.id}:${resultNode.id}`,
