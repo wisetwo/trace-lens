@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-const publish = args.includes("--publish");
-const rest = args.filter((arg) => arg !== "--publish");
-const bump = rest[0] && !rest[0].startsWith("-") ? rest[0] : "patch";
-const publishArgs = rest[0] && !rest[0].startsWith("-") ? rest.slice(1) : rest;
+if (args.includes("--publish")) {
+  throw new Error("npm run release only bumps, commits, and tags. Publish that version with npm run publish:npm.");
+}
+const bump = args[0] && !args[0].startsWith("-") ? args[0] : "patch";
 
 const packagePath = path.join(rootDir, "package.json");
 const lockPath = path.join(rootDir, "package-lock.json");
@@ -44,25 +44,7 @@ try {
   throw error;
 }
 
-console.log(`Released ${tag}. package.json and the tag are the shared version.`);
-if (!publish) {
-  console.log("Not published. Re-run with --publish, or run npm publish, when this build should go to the registry.");
-  process.exit(0);
-}
-
-const npmPublishArgs = ["publish", ...publishArgs];
-const hasAccessArg = publishArgs.includes("--access") || publishArgs.some((arg) => arg.startsWith("--access="));
-const usesCustomRegistry = Boolean(packageJson.publishConfig?.registry) || publishArgs.some((arg) => arg === "--registry" || arg.startsWith("--registry="));
-if (!hasAccessArg && !packageJson.publishConfig?.access && !usesCustomRegistry) {
-  npmPublishArgs.splice(1, 0, "--access", "public");
-}
-
-try {
-  await run("npm", npmPublishArgs);
-} catch (error) {
-  console.error(`Publish failed. ${tag} stays in git; retry with npm publish.`);
-  throw error;
-}
+console.log(`Released ${tag}. Publish this version with npm run publish:npm.`);
 
 function nextVersion(current, bumpType) {
   if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bumpType)) {
@@ -89,7 +71,7 @@ function nextVersion(current, bumpType) {
       version[2] += 1;
       break;
     default:
-      throw new Error("Usage: npm run release -- [patch|minor|major|x.y.z] [--publish] [npm publish args...]");
+      throw new Error("Usage: npm run release -- [patch|minor|major|x.y.z]");
   }
 
   return version.join(".");

@@ -204,12 +204,12 @@ npm run build
 # Type check
 npm run typecheck
 
-# Record the next version: commit package.json and tag vX.Y.Z. Does not publish.
+# Bump package.json, commit, and tag vX.Y.Z. Does not publish.
 npm run release -- patch
 npm run release -- 0.1.11
 
-# Also publish to npm
-npm run release -- patch --publish
+# Publish the tagged version already in package.json. Does not bump.
+npm run publish:npm
 
 # Copy that tag into the other checkout. Its package name and LICENSE stay local.
 node scripts/sync-mirror.mjs /path/to/other/trace-lens --commit
