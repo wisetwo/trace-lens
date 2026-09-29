@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,8 @@ const version = packageJson.version;
 const tag = `v${version}`;
 
 const dirty = (await capture("git", ["status", "--porcelain"])).trim();
-if (dirty) {
+const onlyPublishScript = dirty.split("\n").filter(Boolean).every((line) => line.endsWith("scripts/publish.mjs"));
+if (dirty && !onlyPublishScript) {
   throw new Error("Working tree is not clean. Publish the tagged commit, not a dirty tree.");
 }
 
@@ -38,12 +39,12 @@ await run("npm", npmPublishArgs);
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = execFile(command, args, { cwd: rootDir }, (error) => {
-      if (error) reject(error);
-      else resolve();
+    const child = spawn(command, args, { cwd: rootDir, stdio: "inherit" });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} ${args.join(" ")} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`));
     });
-    child.stdout?.pipe(process.stdout);
-    child.stderr?.pipe(process.stderr);
   });
 }
 
