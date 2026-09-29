@@ -110,6 +110,15 @@ export interface TraceEdge {
   inferred?: boolean;
 }
 
+/** State of a running capture proxy, as shown by the viewer's config editor. */
+export interface ProxyConfigSnapshot {
+  path: string;
+  text: string;
+  listeners: { name: string; url: string }[];
+  ui: string | null;
+  warnings: string[];
+}
+
 export interface AgentTraceGraph {
   file: string;
   totalEntries: number;

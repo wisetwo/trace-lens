@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createServer } from "../index.js";
-import { loadConfig, traceLensHome } from "./config.js";
-import { startProxy } from "./proxy-server.js";
+import type { ProxyConfigSnapshot } from "../../shared/types.js";
+import { createServer, type ProxyConfigApi, type RunningServer } from "../index.js";
+import { loadConfig, parseConfig, traceLensHome, type ProxyConfig } from "./config.js";
+import { startProxy, type RunningProxy } from "./proxy-server.js";
 
 export interface DaemonState {
   pid: number;
@@ -14,6 +15,10 @@ export interface DaemonState {
   logFile: string;
   listeners: { name: string; url: string }[];
   ui: string | null;
+  /** Viewer page for editing the config, when editing is allowed. */
+  configEditor?: string | null;
+  /** E.g. listeners that moved off a busy port. */
+  warnings?: string[];
 }
 
 export function statePath(): string {
@@ -53,32 +58,101 @@ export async function runProxy(configPath: string): Promise<void> {
     throw new Error(`trace-lens proxy is already running (pid ${existing.pid}). Use \`trace-lens proxy stop\` first.`);
   }
 
-  const config = await loadConfig(configPath);
+  let config = await loadConfig(configPath);
   await fs.mkdir(config.dataDir, { recursive: true });
   const log = (line: string) => console.log(line);
+  const startedAt = new Date().toISOString();
 
-  const proxy = await startProxy(config, log);
-  let ui: Awaited<ReturnType<typeof createServer>> | null = null;
-  try {
-    if (config.ui.enabled) {
-      ui = await createServer({ inputPath: config.dataDir, port: config.ui.port, host: config.ui.host ?? config.host, auth: config.ui.auth });
+  let ui: RunningServer | null = null;
+  const proxyOptions = { log, uiUrl: () => ui?.url ?? null };
+  let proxy: RunningProxy = await startProxy(config, proxyOptions);
+
+  const warnings = () => [...proxy.warnings, ...(ui?.warning ? [`ui: ${ui.warning}`] : [])];
+  const snapshot = async (): Promise<ProxyConfigSnapshot> => ({
+    path: configPath,
+    text: await fs.readFile(configPath, "utf8"),
+    listeners: proxy.listeners,
+    ui: ui?.url ?? null,
+    warnings: warnings(),
+  });
+
+  let saving: Promise<unknown> = Promise.resolve();
+  const configApi: ProxyConfigApi = {
+    read: snapshot,
+    save: (text) => {
+      const run = saving.then(async () => {
+        const { raw, config: next } = parseConfig(text, configPath);
+        await fs.mkdir(next.dataDir, { recursive: true });
+        await reload(next);
+        await fs.writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+        log(`config saved from the viewer and applied`);
+        printState(await writeState(), log);
+        return snapshot();
+      });
+      saving = run.catch(() => undefined);
+      return run;
+    },
+  };
+
+  const startUi = async (cfg: ProxyConfig): Promise<RunningServer | null> => {
+    if (!cfg.ui.enabled) return null;
+    const server = await createServer({
+      inputPath: cfg.dataDir,
+      port: cfg.ui.port,
+      host: cfg.ui.host ?? cfg.host,
+      auth: cfg.ui.auth,
+      proxyConfig: configEditable(cfg) ? configApi : undefined,
+    });
+    return server;
+  };
+
+  const writeState = async () => {
+    const state: DaemonState = {
+      pid: process.pid,
+      configPath,
+      startedAt,
+      dataDir: config.dataDir,
+      logFile: process.stdout.isTTY ? "(stdout)" : logPath(),
+      listeners: proxy.listeners,
+      ui: ui?.url ?? null,
+      configEditor: ui && configEditable(config) ? `${ui.url}/#config` : null,
+      warnings: warnings(),
+    };
+    await fs.mkdir(traceLensHome(), { recursive: true });
+    await fs.writeFile(statePath(), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    return state;
+  };
+
+  /** Swap listeners to `next`; in-flight requests finish on the old ones. Restores the previous config on failure. */
+  const reload = async (next: ProxyConfig) => {
+    const previous = { config, proxy, ui };
+    const restartUi = uiKey(next) !== uiKey(config);
+    const sameCaptures = next.dataDir === config.dataDir && next.sessionIdleMinutes === config.sessionIdleMinutes;
+    await proxy.stop({ drain: true });
+    if (restartUi) await ui?.stop({ drain: true });
+    let started: RunningProxy | null = null;
+    try {
+      started = await startProxy(next, { ...proxyOptions, correlator: sameCaptures ? previous.proxy.correlator : undefined });
+      proxy = started;
+      if (restartUi) ui = await startUi(next);
+      config = next;
+    } catch (error) {
+      await started?.stop();
+      proxy = await startProxy(previous.config, { ...proxyOptions, correlator: previous.proxy.correlator });
+      ui = restartUi ? await startUi(previous.config) : previous.ui;
+      throw error;
+    } finally {
+      await writeState();
     }
+  };
+
+  try {
+    ui = await startUi(config);
   } catch (error) {
     await proxy.stop();
     throw error;
   }
-
-  const state: DaemonState = {
-    pid: process.pid,
-    configPath,
-    startedAt: new Date().toISOString(),
-    dataDir: config.dataDir,
-    logFile: process.stdout.isTTY ? "(stdout)" : logPath(),
-    listeners: proxy.listeners,
-    ui: ui?.url ?? null,
-  };
-  await fs.mkdir(traceLensHome(), { recursive: true });
-  await fs.writeFile(statePath(), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const state = await writeState();
 
   log(`trace-lens proxy started (pid ${process.pid}), config ${configPath}`);
   printState(state, log);
@@ -95,6 +169,17 @@ export async function runProxy(configPath: string): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("exit", removeOwnState);
+}
+
+/** The editor can redirect traffic and inject credentials, so it needs a loopback-only viewer or auth. */
+function configEditable(config: ProxyConfig): boolean {
+  const host = config.ui.host ?? config.host;
+  return Boolean(config.ui.auth) || host === "localhost" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** Settings that require restarting the viewer server. */
+function uiKey(config: ProxyConfig): string {
+  return JSON.stringify([config.dataDir, config.host, config.ui.enabled, config.ui.port, config.ui.host, config.ui.auth]);
 }
 
 function removeOwnState(): void {
@@ -162,6 +247,8 @@ export function printState(state: DaemonState, log: (line: string) => void = con
   log(`  captures: ${state.dataDir}`);
   log(`  log:      ${state.logFile}`);
   if (state.ui) log(`  ui:       ${state.ui}`);
+  if (state.configEditor) log(`  edit config: ${state.configEditor}`);
   log(`  endpoints (use as base URL):`);
   for (const listener of state.listeners) log(`    ${listener.name.padEnd(12)} ${listener.url}`);
+  for (const warning of state.warnings ?? []) log(`  warning: ${warning}`);
 }

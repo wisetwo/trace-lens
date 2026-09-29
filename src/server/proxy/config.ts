@@ -55,18 +55,27 @@ function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(1)) : value;
 }
 
+/** A problem with the config contents, as opposed to an I/O failure. */
+export class ConfigError extends Error {}
+
 export async function loadConfig(configPath: string): Promise<ProxyConfig> {
   const text = await fs.readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") throw new Error(`Config not found: ${configPath}\nRun \`trace-lens proxy init\` to create one.`);
     throw error;
   });
-  let raw: Partial<ProxyConfig>;
+  return parseConfig(text, configPath).config;
+}
+
+/** `raw` is the JSON as written (relative `dataDir` etc. kept); `config` is validated and resolved. */
+export function parseConfig(text: string, configPath: string): { raw: Partial<ProxyConfig>; config: ProxyConfig } {
+  let raw: unknown;
   try {
-    raw = JSON.parse(text) as Partial<ProxyConfig>;
+    raw = JSON.parse(text);
   } catch (error) {
-    throw new Error(`Invalid JSON in ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new ConfigError(`Invalid JSON in ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return validateConfig(raw, path.dirname(configPath));
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError(`${configPath} must contain a JSON object`);
+  return { raw: raw as Partial<ProxyConfig>, config: validateConfig(raw as Partial<ProxyConfig>, path.dirname(configPath)) };
 }
 
 export function validateConfig(raw: Partial<ProxyConfig>, baseDir: string): ProxyConfig {
@@ -74,9 +83,9 @@ export function validateConfig(raw: Partial<ProxyConfig>, baseDir: string): Prox
   const config: ProxyConfig = {
     host: raw.host ?? defaults.host,
     port: raw.port ?? defaults.port,
-    dataDir: path.resolve(baseDir, expandHome(raw.dataDir ?? defaults.dataDir)),
+    dataDir: path.resolve(baseDir, expandHome(typeof raw.dataDir === "string" && raw.dataDir ? raw.dataDir : defaults.dataDir)),
     sessionIdleMinutes: raw.sessionIdleMinutes ?? defaults.sessionIdleMinutes,
-    ui: { ...defaults.ui, ...(raw.ui ?? {}) },
+    ui: { ...defaults.ui, ...(raw.ui && typeof raw.ui === "object" ? raw.ui : {}) },
     endpoints: raw.endpoints ?? [],
   };
 
@@ -84,7 +93,11 @@ export function validateConfig(raw: Partial<ProxyConfig>, baseDir: string): Prox
   const checkPort = (value: unknown, label: string) => {
     if (!Number.isInteger(value) || (value as number) <= 0 || (value as number) > 65535) errors.push(`${label} must be a valid port`);
   };
+  if (typeof config.host !== "string" || !config.host) errors.push("host must be a non-empty string");
   checkPort(config.port, "port");
+  if (typeof raw.dataDir !== "undefined" && (typeof raw.dataDir !== "string" || !raw.dataDir)) errors.push("dataDir must be a non-empty string");
+  if (typeof config.sessionIdleMinutes !== "number" || !(config.sessionIdleMinutes > 0)) errors.push("sessionIdleMinutes must be a positive number");
+  if (typeof config.ui.enabled !== "boolean") errors.push("ui.enabled must be true or false");
   if (config.ui.enabled) checkPort(config.ui.port, "ui.port");
   if (!Array.isArray(config.endpoints) || config.endpoints.length === 0) errors.push("endpoints must be a non-empty array");
 
@@ -118,8 +131,12 @@ export function validateConfig(raw: Partial<ProxyConfig>, baseDir: string): Prox
     if (endpoint?.format !== undefined && !FORMATS.includes(endpoint.format)) {
       errors.push(`${label}.format must be one of ${FORMATS.join(", ")}`);
     }
+    const headers: unknown = endpoint?.headers;
+    if (headers !== undefined && (!headers || typeof headers !== "object" || Array.isArray(headers) || Object.values(headers).some((value) => typeof value !== "string"))) {
+      errors.push(`${label}.headers must be an object of string values`);
+    }
   }
-  if (errors.length) throw new Error(`Invalid proxy config:\n  - ${errors.join("\n  - ")}`);
+  if (errors.length) throw new ConfigError(`Invalid proxy config:\n  - ${errors.join("\n  - ")}`);
   return config;
 }
 

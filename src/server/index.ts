@@ -1,13 +1,21 @@
 import express from "express";
-import type { Server } from "node:http";
+import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeAgentBundle } from "./agent-bundle.js";
+import { drainServer, listenWithFallback } from "./listen.js";
+import { ConfigError } from "./proxy/config.js";
 import { TraceStore, readTraceEntries, resolveTraceFile } from "./trace-reader.js";
-import type { AgentTraceGraph, TraceEntry } from "../shared/types.js";
+import type { AgentTraceGraph, ProxyConfigSnapshot, TraceEntry } from "../shared/types.js";
+
+export interface ProxyConfigApi {
+  read: () => Promise<ProxyConfigSnapshot>;
+  /** Validate, apply and persist a new config file text. Throws `ConfigError` for invalid contents. */
+  save: (text: string) => Promise<ProxyConfigSnapshot>;
+}
 
 export interface ServerOptions {
   inputPath: string;
@@ -16,11 +24,17 @@ export interface ServerOptions {
   host?: string;
   /** "user:password" for HTTP Basic auth on every route. */
   auth?: string;
+  /** Enables the proxy config editor (`/api/proxy/config`). */
+  proxyConfig?: ProxyConfigApi;
 }
 
 export interface RunningServer {
   url: string;
-  stop: () => Promise<void>;
+  port: number;
+  /** Set when the requested port was busy and another one was used. */
+  warning?: string;
+  /** `drain` lets in-flight requests finish instead of cutting them off. */
+  stop: (options?: { drain?: boolean }) => Promise<void>;
 }
 
 export async function createServer(options: ServerOptions): Promise<RunningServer> {
@@ -145,6 +159,39 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     res.json({ ok: true });
   });
 
+  const proxyConfig = options.proxyConfig;
+  if (proxyConfig) {
+    // The config holds upstreams and injected credentials: refuse cross-site requests, and DNS rebinding when there is no auth.
+    const guard: express.RequestHandler = (req, res, next) => {
+      const origin = req.headers.origin;
+      if ((origin && origin !== `${req.protocol}://${req.headers.host}`) || (!options.auth && !isLoopbackHost(req.hostname))) {
+        res.status(403).json({ error: "Config editing is only allowed from the viewer itself" });
+        return;
+      }
+      next();
+    };
+    const respond = async (res: express.Response, action: () => Promise<ProxyConfigSnapshot>) => {
+      try {
+        res.json(await action());
+      } catch (error) {
+        res.status(error instanceof ConfigError ? 400 : 500).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    app.get(`${routePrefix}/api/proxy/config`, guard, (_req, res) => void respond(res, proxyConfig.read));
+    app.put(`${routePrefix}/api/proxy/config`, guard, express.json({ limit: "1mb" }), (req, res) => {
+      const text = (req.body as { text?: unknown } | undefined)?.text;
+      if (typeof text !== "string") {
+        res.status(400).json({ error: 'Expected a JSON body {"text": "<config file contents>"}' });
+        return;
+      }
+      void respond(res, () => proxyConfig.save(text));
+    });
+  }
+
+  app.all(`${routePrefix}/api/*`, (_req, res) => {
+    res.status(404).json({ error: "Not found" });
+  });
+
   const currentFile = fileURLToPath(import.meta.url);
   const serverDir = path.dirname(currentFile);
   const clientDir = path.resolve(serverDir, "../client");
@@ -183,10 +230,9 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
     res.type("html").send(html);
   });
 
-  const listener = await listenOnAvailablePort(app, options.port, options.host);
+  const listener = http.createServer(app);
+  const { port: actualPort, warning } = await listenWithFallback(listener, options.port, options.host);
 
-  const address = listener.address();
-  const actualPort = typeof address === "object" && address ? address.port : options.port;
   const displayHost = !options.host
     ? "localhost"
     : options.host === "0.0.0.0" || options.host === "::"
@@ -194,11 +240,22 @@ export async function createServer(options: ServerOptions): Promise<RunningServe
       : options.host;
   return {
     url: `http://${displayHost}:${actualPort}`,
-    stop: () => new Promise((resolve, reject) => {
+    port: actualPort,
+    warning,
+    stop: ({ drain = false } = {}) => new Promise((resolve, reject) => {
+      if (drain) {
+        drainServer(listener);
+        resolve();
+        return;
+      }
       listener.close((error) => (error ? reject(error) : resolve()));
       listener.closeAllConnections();
     }),
   };
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "::1" || hostname === "[::1]" || /^127(\.\d{1,3}){3}$/.test(hostname);
 }
 
 function externalIPv4(): string | undefined {
@@ -318,40 +375,4 @@ function summarizeEntries(entries: TraceEntry[]): TraceFileSummary {
 
 function emptyGraph(): AgentTraceGraph {
   return { file: "(no traces yet)", totalEntries: 0, totalNodes: 0, agents: [], nodes: [], edges: [] };
-}
-
-async function listenOnAvailablePort(app: express.Express, preferredPort: number, host?: string): Promise<Server> {
-  const maxAttempts = 100;
-  for (let offset = 0; offset < maxAttempts; offset += 1) {
-    const port = preferredPort + offset;
-    try {
-      return await listen(app, port, host);
-    } catch (error) {
-      if (!isAddressInUse(error)) throw error;
-    }
-  }
-
-  throw new Error(`No available port found from ${preferredPort} to ${preferredPort + maxAttempts - 1}`);
-}
-
-function listen(app: express.Express, port: number, host?: string): Promise<Server> {
-  return new Promise((resolve, reject) => {
-    const server = host ? app.listen(port, host) : app.listen(port);
-
-    const handleError = (error: Error) => {
-      server.off("listening", handleListening);
-      reject(error);
-    };
-    const handleListening = () => {
-      server.off("error", handleError);
-      resolve(server);
-    };
-
-    server.once("error", handleError);
-    server.once("listening", handleListening);
-  });
-}
-
-function isAddressInUse(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
 }

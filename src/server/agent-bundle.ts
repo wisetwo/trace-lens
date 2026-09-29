@@ -1,6 +1,8 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { exportBaseName } from "../shared/export-name.js";
+import { bundleDirName } from "../shared/export-name.js";
+import { formatBytes, imageExtension, imagePart, isImageType, type ImagePart } from "../shared/image-part.js";
 
 /**
  * Turn one trace JSON entry into a directory an agent can skim.
@@ -10,7 +12,8 @@ import { exportBaseName } from "../shared/export-name.js";
  * produced the trace.
  *
  * `index.md` is the overview. Bodies past the inline limit are written
- * under `files/` and referenced from the overview.
+ * under `files/` and referenced from the overview. Embedded images are
+ * decoded into `files/` as well, once per distinct image.
  */
 
 const TEXT_INLINE = 4000;
@@ -66,8 +69,11 @@ const HANDLED_KEYS = new Set<string>([
 
 export interface BundleFile {
   relativePath: string;
-  contents: string;
+  contents: string | Buffer;
 }
+
+/** Image files already written for this bundle, by content hash. */
+type ImageFiles = Map<string, { rel: string; firstMessage: number }>;
 
 export interface AgentBundle {
   mainFile: string;
@@ -84,7 +90,7 @@ type Block =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool_use"; name: string; id: string; input: unknown }
-  | { kind: "image"; note: string }
+  | { kind: "image"; image: ImagePart | null }
   | { kind: "raw"; text: string };
 
 export function buildAgentBundle(entry: unknown): AgentBundle {
@@ -140,7 +146,8 @@ export function buildAgentBundle(entry: unknown): AgentBundle {
     lines.push("_No messages._");
     lines.push("");
   } else {
-    const rendered = messages.map((message, index) => renderMessage(message, index, files, systemText));
+    const images: ImageFiles = new Map();
+    const rendered = messages.map((message, index) => renderMessage(message, index, files, images, systemText));
     lines.push("| # | Who | Chars | What | Detail |");
     lines.push("| --- | --- | ---: | --- | --- |");
     for (const item of rendered) {
@@ -165,7 +172,8 @@ export function buildAgentBundle(entry: unknown): AgentBundle {
     lines.push("_Nothing was long enough to split out._");
   } else {
     for (const file of files) {
-      lines.push(`- \`${file.relativePath}\` (${file.contents.length.toLocaleString()} chars)`);
+      const size = typeof file.contents === "string" ? `${file.contents.length.toLocaleString()} chars` : formatBytes(file.contents.length);
+      lines.push(`- \`${file.relativePath}\` (${size})`);
     }
   }
   lines.push("");
@@ -174,13 +182,14 @@ export function buildAgentBundle(entry: unknown): AgentBundle {
   return { mainFile: MAIN_FILE, files };
 }
 
-export async function writeAgentBundle(traceFile: string, entry: unknown, date = new Date()): Promise<{
+export async function writeAgentBundle(traceFile: string, entry: unknown): Promise<{
   directory: string;
   mainFile: string;
   files: string[];
 }> {
   const parent = path.resolve(path.dirname(traceFile));
-  const directory = path.resolve(parent, bundleDirName(entry, date));
+  const seq = asRecord(entry)?.seq;
+  const directory = path.resolve(parent, bundleDirName(traceFile, typeof seq === "number" || typeof seq === "string" ? seq : "entry"));
   if (path.dirname(directory) !== parent) {
     throw new Error("Refusing to write the bundle outside the trace file's directory");
   }
@@ -194,19 +203,13 @@ export async function writeAgentBundle(traceFile: string, entry: unknown, date =
       throw new Error(`Refusing to write ${file.relativePath}`);
     }
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, file.contents, "utf8");
+    await fs.writeFile(target, file.contents);
   }
   return {
     directory,
     mainFile: bundle.mainFile,
     files: bundle.files.map((file) => file.relativePath),
   };
-}
-
-function bundleDirName(entry: unknown, date: Date): string {
-  const seq = asRecord(entry)?.seq;
-  const seqLabel = typeof seq === "number" || typeof seq === "string" ? seq : "entry";
-  return exportBaseName(seqLabel, date, "full");
 }
 
 function renderTools(tools: unknown, files: BundleFile[]): string[] {
@@ -247,7 +250,7 @@ function identifierLine(record: Record<string, unknown> | null): string {
   return bits.length ? bits.join(" · ") : "";
 }
 
-function renderMessage(message: unknown, index: number, files: BundleFile[], topLevelSystem: string | null): {
+function renderMessage(message: unknown, index: number, files: BundleFile[], images: ImageFiles, topLevelSystem: string | null): {
   index: number;
   role: string;
   name: string;
@@ -322,14 +325,60 @@ function renderMessage(message: unknown, index: number, files: BundleFile[], top
       parts.push("");
       parts.push(fence(shown, "json"));
     } else {
-      chars += block.note.length;
-      parts.push(`_${block.note}_`);
+      const image = renderImage(block.image, index, `${slug}-image${blockIndex ? `-${blockIndex}` : ""}`, files, images);
+      if (image.rel && !spilled.includes(image.rel)) spilled.push(image.rel);
+      parts.push(image.markdown);
     }
     parts.push("");
   });
 
   const summary = summarize(role, name, blocks);
   return { index, role, name, chars, summary, files: spilled, markdown: parts.join("\n") };
+}
+
+/** Embedded images become files (one per distinct image); remote ones stay links. */
+function renderImage(image: ImagePart | null, index: number, slug: string, files: BundleFile[], images: ImageFiles): { rel: string | null; markdown: string } {
+  if (!image) return { rel: null, markdown: "_image (no data or URL)_" };
+  if (!image.base64) {
+    return { rel: null, markdown: `![m${index} image](${image.src})\n\n_remote image, not downloaded: ${image.src}_` };
+  }
+  const hash = crypto.createHash("sha1").update(image.base64).digest("hex");
+  const seen = images.get(hash);
+  if (seen) {
+    return { rel: seen.rel, markdown: `![m${index} image](${seen.rel})\n\nSame image as m${seen.firstMessage} → \`${seen.rel}\`` };
+  }
+  const data = Buffer.from(image.base64, "base64");
+  const rel = spillRaw(files, `${slug}.${imageExtension(image.mimeType)}`, data);
+  images.set(hash, { rel, firstMessage: index });
+  const size = imageDimensions(data);
+  const facts = [image.mimeType, size ? `${size.width}×${size.height}` : "", formatBytes(data.length)].filter(Boolean).join(" · ");
+  return { rel, markdown: `![m${index} image](${rel})\n\n${facts} → \`${rel}\`` };
+}
+
+function imageDimensions(data: Buffer): { width: number; height: number } | null {
+  if (data.length >= 24 && data.toString("ascii", 1, 4) === "PNG") {
+    return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+  }
+  if (data.length >= 10 && data.toString("ascii", 0, 3) === "GIF") {
+    return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
+  }
+  if (data[0] === 0xff && data[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < data.length) {
+      if (data[offset] !== 0xff) return null;
+      const marker = data[offset + 1];
+      if (marker === 0xff) {
+        offset += 1;
+        continue;
+      }
+      // SOF0–SOF15 carry the frame size; C4 (DHT), C8 (JPG) and CC (DAC) share the range but do not.
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { height: data.readUInt16BE(offset + 5), width: data.readUInt16BE(offset + 7) };
+      }
+      offset += 2 + data.readUInt16BE(offset + 2);
+    }
+  }
+  return null;
 }
 
 function renderOtherFields(record: Record<string, unknown> | null, files: BundleFile[]): string[] {
@@ -385,8 +434,7 @@ function summarize(role: string, name: string, blocks: Block[]): string {
   if (texts[0]) return openingLine(texts[0].text);
   const thinking = blocks.find((block) => block.kind === "thinking");
   if (thinking && thinking.kind === "thinking" && thinking.text.trim()) return `thinking: ${oneLine(thinking.text, 80)}`;
-  const image = blocks.find((block) => block.kind === "image");
-  if (image && image.kind === "image") return image.note;
+  if (blocks.some((block) => block.kind === "image")) return "image";
   return role;
 }
 
@@ -484,11 +532,7 @@ function blockFromItem(item: unknown): Block {
   if (type === "tool_result" || type === "toolResult") {
     return { kind: "text", text: stringify(obj.content ?? obj.output ?? obj.text ?? "") };
   }
-  if (type === "image" || type === "image_url" || type === "input_image") {
-    const data = typeof obj.data === "string" ? obj.data : "";
-    const mime = typeof obj.mimeType === "string" ? obj.mimeType : typeof obj.media_type === "string" ? obj.media_type : "";
-    return { kind: "image", note: `image${mime ? ` ${mime}` : ""}${data ? ` (${data.length.toLocaleString()} chars of data, not inlined)` : ""}` };
-  }
+  if (isImageType(type)) return { kind: "image", image: imagePart(obj) };
   if (typeof obj.text === "string") return { kind: "text", text: obj.text };
   return { kind: "raw", text: JSON.stringify(obj, null, 2) };
 }
@@ -544,7 +588,7 @@ function spill(files: BundleFile[], preferred: string, text: string, limits: Spi
   return { shown: `${head}${marker}${tail}`, rel };
 }
 
-function spillRaw(files: BundleFile[], preferred: string, contents: string): string {
+function spillRaw(files: BundleFile[], preferred: string, contents: string | Buffer): string {
   let relativePath = preferred;
   let suffix = 2;
   while (files.some((file) => file.relativePath === relativePath)) {

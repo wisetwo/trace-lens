@@ -8,12 +8,15 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import jsonLanguage from "react-syntax-highlighter/dist/esm/languages/prism/json";
 import markdownLanguage from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { exportBaseName } from "../shared/export-name.js";
+import { exportFileName } from "../shared/export-name.js";
+import { base64ByteLength, formatBytes, imageExtension, imagePart, type ImagePart } from "../shared/image-part.js";
 import type { AgentTraceGraph, TraceEdge, TraceEntry, TraceMessage, TraceNode, TraceToolDef } from "../shared/types.js";
+import { ConfigPanel } from "./ConfigPanel.js";
 
 type DetailState = {
   node: TraceNode;
@@ -209,14 +212,14 @@ function makeDownloadEntry(entry: TraceEntry, options: DownloadOptions): TraceEn
   return output;
 }
 
-function downloadJson(entry: TraceEntry, options: DownloadOptions) {
+function downloadJson(entry: TraceEntry, options: DownloadOptions, traceFile: string) {
   const isFullDownload = options.includeFullSystemPrompts && options.includeFullToolDefinitions;
   const blob = new Blob([JSON.stringify(makeDownloadEntry(entry, options), null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const kind = isFullDownload ? "full" : "ai";
   anchor.href = url;
-  anchor.download = `${exportBaseName(entry.seq, new Date(), kind)}.json`;
+  anchor.download = exportFileName(traceFile, entry.seq, kind);
   anchor.click();
   URL.revokeObjectURL(url);
 }
@@ -328,6 +331,8 @@ export function App() {
   // "" follows the newest file in directory mode.
   const [selectedFile, setSelectedFile] = useState<string>(initialSelectedFile);
   const [live, setLive] = useState(true);
+  const [configEditable, setConfigEditable] = useState(false);
+  const [showConfig, setShowConfig] = useState(() => typeof window !== "undefined" && window.location.hash === "#config");
   const disabledAgents = useRef<Set<string>>(new Set());
   const lastVersion = useRef<string>("");
 
@@ -366,6 +371,23 @@ export function App() {
   }, [loadFiles, loadGraph, selectedFile]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // Only a proxy-mode viewer serves the config API.
+  useEffect(() => {
+    fetch(`${getBasePath()}/api/proxy/config`).then((response) => setConfigEditable(response.ok)).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const onHashChange = () => setShowConfig(window.location.hash === "#config");
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  const toggleConfig = useCallback((open: boolean) => {
+    const url = new URL(window.location.href);
+    url.hash = open ? "config" : "";
+    window.history.replaceState(null, "", url);
+    setShowConfig(open);
+  }, []);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -417,9 +439,11 @@ export function App() {
               <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Live
             </label>
           ) : null}
+          {configEditable ? <button className="button" onClick={() => toggleConfig(true)}>Config</button> : null}
           <button className="button" onClick={() => void refresh()}>Refresh</button>
         </div>
       </header>
+      {showConfig && configEditable ? <ConfigPanel apiBase={getBasePath()} onClose={() => toggleConfig(false)} /> : null}
 
       {error ? <div className="error-banner">{error}</div> : null}
 
@@ -469,13 +493,13 @@ export function App() {
           </ReactFlow>
         </section>
 
-        <DetailPanel detail={detail} file={graphFile} onClose={closeDetail} />
+        <DetailPanel detail={detail} file={graphFile} traceFile={graph?.file ?? "trace"} onClose={closeDetail} />
       </main>
     </div>
   );
 }
 
-const DetailPanel = memo(function DetailPanel({ detail, file, onClose }: { detail: DetailState | null; file?: string; onClose: () => void }) {
+const DetailPanel = memo(function DetailPanel({ detail, file, traceFile, onClose }: { detail: DetailState | null; file?: string; traceFile: string; onClose: () => void }) {
   const [showDownloadOptions, setShowDownloadOptions] = useState(false);
   const [downloadOptions, setDownloadOptions] = useState<DownloadOptions>({
     includeFullSystemPrompts: true,
@@ -512,7 +536,7 @@ const DetailPanel = memo(function DetailPanel({ detail, file, onClose }: { detai
             {entry ? (
               <button
                 className="button small"
-                title="Write an agent-readable directory next to the trace file. index.md is the overview; long tool results and inputs go in files/."
+                title="Write an agent-readable directory next to the trace file. index.md is the overview; long tool results, inputs and images go in files/."
                 disabled={organizing}
                 onClick={() => {
                   setOrganizing(true);
@@ -521,7 +545,7 @@ const DetailPanel = memo(function DetailPanel({ detail, file, onClose }: { detai
                     .then((result) => {
                       setOrganizeNote({
                         error: false,
-                        message: `Wrote ${result.directory} — open ${result.mainFile}. Long tool results and inputs are in files/ beside it.`,
+                        message: `Wrote ${result.directory} — open ${result.mainFile}. Long tool results, inputs and images are in files/ beside it.`,
                       });
                     })
                     .catch((err: unknown) => {
@@ -573,7 +597,7 @@ const DetailPanel = memo(function DetailPanel({ detail, file, onClose }: { detai
                       <button
                         className="button small primary"
                         onClick={() => {
-                          downloadJson(entry, downloadOptions);
+                          downloadJson(entry, downloadOptions, traceFile);
                           setShowDownloadOptions(false);
                         }}
                       >
@@ -817,7 +841,8 @@ function ContentView({ value }: { value: unknown }) {
     const type = String(obj.type || "");
     if (type === "text") return <TextBlock text={String(obj.text || "")} label="[text]" />;
     if (type === "thinking") return <TextBlock text={String(obj.text || obj.thinking || "")} label="[thinking]" variant="thinking" />;
-    if (type === "image" && typeof obj.data === "string") return <img className="content-image" src={`data:${obj.mimeType || "image/png"};base64,${obj.data}`} alt="trace" />;
+    const image = imagePart(obj);
+    if (image) return <ImageView image={image} />;
     if (type === "tool_use" || type === "toolCall") {
       return (
         <div className="tool-call-block">
@@ -829,6 +854,46 @@ function ContentView({ value }: { value: unknown }) {
     return <CollapsiblePre text={JSON.stringify(obj, null, 2)} language="json" />;
   }
   return <span>{String(value)}</span>;
+}
+
+/** A bounded thumbnail; click opens the full-size image over the page. */
+function ImageView({ image }: { image: ImagePart }) {
+  const [open, setOpen] = useState(false);
+  const [dimensions, setDimensions] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+  const facts = [image.mimeType, dimensions, image.base64 ? formatBytes(base64ByteLength(image.base64)) : "remote"].filter(Boolean).join(" · ");
+  return (
+    <div className="image-block">
+      <span className="content-type">[image] {facts}</span>
+      <button className="image-thumb" title="Click to view full size" onClick={() => setOpen(true)}>
+        <img
+          src={image.src}
+          alt="trace image"
+          loading="lazy"
+          decoding="async"
+          onLoad={(event) => setDimensions(`${event.currentTarget.naturalWidth}×${event.currentTarget.naturalHeight}`)}
+        />
+      </button>
+      {open ? createPortal(
+        <div className="image-lightbox" onClick={() => setOpen(false)}>
+          <img src={image.src} alt="trace image" onClick={(event) => event.stopPropagation()} />
+          <div className="image-lightbox-bar" onClick={(event) => event.stopPropagation()}>
+            <span>{facts}</span>
+            {image.base64 ? <a className="button small" href={image.src} download={`image.${imageExtension(image.mimeType)}`}>Download</a> : <a className="button small" href={image.src} target="_blank" rel="noreferrer">Open</a>}
+            <button className="button small" onClick={() => setOpen(false)}>Close</button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  );
 }
 
 function TextBlock({ text, label, variant }: { text: string; label?: string; variant?: "thinking" }) {

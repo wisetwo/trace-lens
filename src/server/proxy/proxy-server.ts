@@ -1,13 +1,26 @@
 import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
+import { drainServer, listenWithFallback } from "../listen.js";
 import type { EndpointConfig, ProxyConfig } from "./config.js";
 import { Correlator, HEADER_PREFIX } from "./correlate.js";
 import { detectFormat, normalizeCall, type WireFormat } from "./normalize.js";
 
+export interface ProxyOptions {
+  log?: (line: string) => void;
+  /** Reuse the correlator of a previous run so conversations keep linking across a config reload. */
+  correlator?: Correlator;
+  /** Viewer URL reported by the proxy's info page. */
+  uiUrl?: () => string | null;
+}
+
 export interface RunningProxy {
   listeners: { name: string; url: string }[];
-  stop: () => Promise<void>;
+  /** Listeners that had to move off their configured port. */
+  warnings: string[];
+  correlator: Correlator;
+  /** `drain` lets in-flight requests finish instead of cutting them off. */
+  stop: (options?: { drain?: boolean }) => Promise<void>;
 }
 
 const HOP_BY_HOP = new Set([
@@ -24,10 +37,12 @@ const HOP_BY_HOP = new Set([
 const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 const STREAM_DONE = /data: ?\[DONE\]|"type": ?"(message_stop|response\.completed|response\.incomplete|response\.failed)"/;
 
-export async function startProxy(config: ProxyConfig, log: (line: string) => void = console.log): Promise<RunningProxy> {
-  const correlator = new Correlator({ dataDir: config.dataDir, idleMs: config.sessionIdleMinutes * 60_000 });
+export async function startProxy(config: ProxyConfig, options: ProxyOptions = {}): Promise<RunningProxy> {
+  const log = options.log ?? console.log;
+  const correlator = options.correlator ?? new Correlator({ dataDir: config.dataDir, idleMs: config.sessionIdleMinutes * 60_000 });
   const byName = new Map(config.endpoints.map((endpoint) => [endpoint.name, endpoint]));
-  const servers: { name: string; server: http.Server; port: number }[] = [];
+  const host = displayHost(config.host);
+  let sharedPort = config.port;
 
   const shared = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -36,8 +51,9 @@ export async function startProxy(config: ProxyConfig, log: (line: string) => voi
     if (!endpoint) {
       const body = {
         service: "trace-lens proxy",
-        endpoints: config.endpoints.map((e) => ({ name: e.name, baseUrl: `http://${displayHost(config.host)}:${config.port}/${e.name}`, upstream: e.upstream })),
-        ui: config.ui.enabled ? `http://${displayHost(config.host)}:${config.ui.port}` : null,
+        pid: process.pid,
+        endpoints: config.endpoints.map((e) => ({ name: e.name, baseUrl: `http://${host}:${sharedPort}/${e.name}`, upstream: e.upstream })),
+        ui: options.uiUrl?.() ?? null,
       };
       res.writeHead(url.pathname === "/" ? 200 : 404, { "content-type": "application/json" });
       res.end(JSON.stringify(body, null, 2));
@@ -45,33 +61,39 @@ export async function startProxy(config: ProxyConfig, log: (line: string) => voi
     }
     forward(endpoint, `/${rest.join("/")}${url.search}`, req, res, correlator, log);
   });
-  servers.push({ name: "*", server: shared, port: config.port });
-
+  const servers: { endpoint: EndpointConfig | null; server: http.Server; port: number }[] = [{ endpoint: null, server: shared, port: config.port }];
   for (const endpoint of config.endpoints) {
     if (endpoint.port === undefined) continue;
     const server = http.createServer((req, res) => forward(endpoint, req.url ?? "/", req, res, correlator, log));
-    servers.push({ name: endpoint.name, server, port: endpoint.port });
+    servers.push({ endpoint, server, port: endpoint.port });
   }
 
-  const started: typeof servers = [];
+  const reserved = [...servers.map((entry) => entry.port), ...(config.ui.enabled ? [config.ui.port] : [])];
+  const warnings: string[] = [];
+  const started: http.Server[] = [];
   try {
     for (const entry of servers) {
-      await listen(entry.server, entry.port, config.host);
-      started.push(entry);
+      const result = await listenWithFallback(entry.server, entry.port, config.host, { skip: reserved });
+      started.push(entry.server);
+      entry.port = result.port;
+      if (result.warning) warnings.push(`${entry.endpoint ? `endpoint "${entry.endpoint.name}"` : "proxy"}: ${result.warning}`);
     }
   } catch (error) {
-    await Promise.all(started.map((entry) => close(entry.server)));
+    await Promise.all(started.map((server) => close(server)));
     throw error;
   }
+  sharedPort = servers[0].port;
 
-  const host = displayHost(config.host);
   return {
     listeners: [
-      ...config.endpoints.map((e) => ({ name: e.name, url: `http://${host}:${config.port}/${e.name}` })),
-      ...config.endpoints.filter((e) => e.port !== undefined).map((e) => ({ name: e.name, url: `http://${host}:${e.port}` })),
+      ...config.endpoints.map((e) => ({ name: e.name, url: `http://${host}:${sharedPort}/${e.name}` })),
+      ...servers.flatMap((entry) => (entry.endpoint ? [{ name: entry.endpoint.name, url: `http://${host}:${entry.port}` }] : [])),
     ],
-    stop: async () => {
-      await Promise.all(servers.map((entry) => close(entry.server)));
+    warnings,
+    correlator,
+    stop: async ({ drain = false } = {}) => {
+      if (drain) servers.forEach((entry) => drainServer(entry.server));
+      else await Promise.all(servers.map((entry) => close(entry.server)));
     },
   };
 }
@@ -227,22 +249,6 @@ function splitQuery(value: string): [string, string] {
 
 function displayHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "localhost" : host;
-}
-
-function listen(server: http.Server, port: number, host: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(new Error(`Cannot listen on ${host}:${port}: ${error.message}`));
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, host);
-  });
 }
 
 function close(server: http.Server): Promise<void> {

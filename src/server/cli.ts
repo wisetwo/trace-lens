@@ -33,6 +33,7 @@ program
 
     try {
       const server = await createServer({ inputPath, port, basePath });
+      if (server.warning) console.log(`Note: ${server.warning}`);
       console.log(`Trace Lens: ${server.url}`);
       console.log(`Press Ctrl+C to stop.`);
       if (options.open) await open(server.url);

@@ -122,6 +122,14 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8600/anthropic
 
 Open the UI URL shown by `status`. It lists the captured files, follows the newest file by default, and refreshes live.
 
+If a configured port is already in use (e.g. by an editor forwarding a remote proxy), the listener moves to the next free port; `start`/`status` print a warning naming the process holding the port, and the base URLs shown are the actual ones.
+
+### Editing the config in the browser
+
+Click **Config** in the viewer header (or open `<ui>/#config`, printed as `edit config` by `status`). The page shows the running base URLs and lets you edit the config as a form or as raw JSON. **Save & apply** validates the config, writes the file, and reloads the proxy in place: in-flight requests finish on the old listeners, and conversation linking continues unless `dataDir` or `sessionIdleMinutes` changed. If the new config cannot start (e.g. an unbindable host), the previous one is restored and the file is left unchanged.
+
+Because the config controls upstreams and injected credentials, the editor is only available when the viewer listens on a loopback host or has `ui.auth` set.
+
 ### Config
 
 `~/.trace-lens/proxy.json` (override with `--config <file>`; set `TRACE_LENS_HOME` to move the whole state directory):
@@ -196,9 +204,18 @@ npm run build
 # Type check
 npm run typecheck
 
-# Publish a patch release (also supports minor, major, or an explicit version)
+# Record the next version: commit package.json and tag vX.Y.Z. Does not publish.
 npm run release -- patch
+npm run release -- 0.1.11
+
+# Also publish to npm
+npm run release -- patch --publish
+
+# Copy that tag into the other checkout. Its package name and LICENSE stay local.
+node scripts/sync-mirror.mjs /path/to/other/trace-lens --commit
 ```
+
+`package.json` version and the git tag `vX.Y.Z` are the same id in both repositories. Sync from the tag, not from a branch tip.
 
 The Vite dev server runs at `http://localhost:5173` and proxies API requests to `http://localhost:3117`.
 

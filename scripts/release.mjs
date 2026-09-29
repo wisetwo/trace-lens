@@ -1,12 +1,14 @@
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-const bump = args[0] && !args[0].startsWith("-") ? args[0] : "patch";
-const publishArgs = args[0] && !args[0].startsWith("-") ? args.slice(1) : args;
+const publish = args.includes("--publish");
+const rest = args.filter((arg) => arg !== "--publish");
+const bump = rest[0] && !rest[0].startsWith("-") ? rest[0] : "patch";
+const publishArgs = rest[0] && !rest[0].startsWith("-") ? rest.slice(1) : rest;
 
 const packagePath = path.join(rootDir, "package.json");
 const lockPath = path.join(rootDir, "package-lock.json");
@@ -15,8 +17,38 @@ const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
 const lockJson = JSON.parse(await readFile(lockPath, "utf8"));
 const current = packageJson.version;
 const next = nextVersion(current, bump);
+const tag = `v${next}`;
+
+const dirty = (await capture("git", ["status", "--porcelain"])).trim();
+if (dirty) {
+  throw new Error("Working tree is not clean. Commit or stash changes before releasing.");
+}
+const existing = (await capture("git", ["tag", "-l", tag])).trim();
+if (existing === tag) {
+  throw new Error(`Tag ${tag} already exists.`);
+}
 
 await updateVersion(next);
+await run("git", ["add", "package.json", "package-lock.json"]);
+try {
+  await run("git", ["commit", "-m", `chore: release ${next}`]);
+} catch (error) {
+  await updateVersion(current);
+  console.error(`Commit failed. Version rolled back to ${current}.`);
+  throw error;
+}
+try {
+  await run("git", ["tag", "-a", tag, "-m", tag]);
+} catch (error) {
+  console.error(`Committed ${next} but could not create ${tag}. Tag it with: git tag -a ${tag} -m ${tag}`);
+  throw error;
+}
+
+console.log(`Released ${tag}. package.json and the tag are the shared version.`);
+if (!publish) {
+  console.log("Not published. Re-run with --publish, or run npm publish, when this build should go to the registry.");
+  process.exit(0);
+}
 
 const npmPublishArgs = ["publish", ...publishArgs];
 const hasAccessArg = publishArgs.includes("--access") || publishArgs.some((arg) => arg.startsWith("--access="));
@@ -25,12 +57,10 @@ if (!hasAccessArg && !packageJson.publishConfig?.access && !usesCustomRegistry) 
   npmPublishArgs.splice(1, 0, "--access", "public");
 }
 
-console.log(`Version updated to ${next}`);
 try {
   await run("npm", npmPublishArgs);
 } catch (error) {
-  await updateVersion(current);
-  console.error(`Publish failed. Version rolled back to ${current}.`);
+  console.error(`Publish failed. ${tag} stays in git; retry with npm publish.`);
   throw error;
 }
 
@@ -59,7 +89,7 @@ function nextVersion(current, bumpType) {
       version[2] += 1;
       break;
     default:
-      throw new Error(`Usage: npm run release -- [patch|minor|major|x.y.z] [npm publish args...]`);
+      throw new Error("Usage: npm run release -- [patch|minor|major|x.y.z] [--publish] [npm publish args...]");
   }
 
   return version.join(".");
@@ -80,19 +110,24 @@ function writeJson(file, value) {
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: rootDir,
-      stdio: "inherit",
-      shell: process.platform === "win32",
+    const child = execFile(command, args, { cwd: rootDir }, (error) => {
+      if (error) reject(error);
+      else resolve();
     });
+    child.stdout?.pipe(process.stdout);
+    child.stderr?.pipe(process.stderr);
+  });
+}
 
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
+function capture(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { cwd: rootDir, encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error) {
+        error.stderr = stderr;
+        reject(error);
         return;
       }
-      reject(new Error(`${command} ${args.join(" ")} failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}`));
+      resolve(stdout);
     });
   });
 }
